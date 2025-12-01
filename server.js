@@ -48,6 +48,9 @@ app.use("/api/patient", patientRoutes);
 app.use("/api/doctor", doctorRoutes);
 app.use("/api/admin", adminRoutes);
 
+
+
+
 // Root route
 app.get("/", (req, res) => {
   res.json({
