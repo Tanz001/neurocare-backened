@@ -1,4 +1,5 @@
 import { query } from "../config/db.js";
+import pool from "../config/db.js";
 
 const parseSchedule = (scheduleRow) => {
   if (!scheduleRow) return null;
@@ -379,21 +380,52 @@ export const createAppointment = async (req, res) => {
       });
     }
 
-    // Check for duplicate appointments
+    // Check for duplicate appointments (only block if there's an accepted or completed appointment)
+    // Allow multiple pending appointments in case payment failed or user wants to retry
     const existing = await query(
-      `SELECT id FROM appointments 
-       WHERE patient_id = ? AND doctor_id = ? AND appointment_date = ? AND appointment_time = ? AND status NOT IN ('cancelled', 'rejected')`,
+      `SELECT id, status, payment_intent_id 
+       FROM appointments 
+       WHERE patient_id = ? 
+         AND doctor_id = ? 
+         AND appointment_date = ? 
+         AND appointment_time = ? 
+         AND status IN ('accepted', 'completed')`,
       [patientId, doctor_id, appointment_date, timeToStore]
     );
 
     if (existing.length > 0) {
+      const existingAppointment = existing[0];
       return res.status(409).json({
         success: false,
-        message: "You already have an appointment scheduled at this date and time",
+        message: `You already have an ${existingAppointment.status} appointment scheduled at this date and time. Please choose a different time slot.`,
       });
     }
 
-    const insertResult = await query(
+    // Check if there's a pending appointment (allow creating new one, but cancel old pending if exists)
+    // Note: payment_intent_id may not exist in older database schemas
+    const pendingAppointments = await query(
+      `SELECT id 
+       FROM appointments 
+       WHERE patient_id = ? 
+         AND doctor_id = ? 
+         AND appointment_date = ? 
+         AND appointment_time = ? 
+         AND status = 'pending'`,
+      [patientId, doctor_id, appointment_date, timeToStore]
+    );
+
+    // Cancel any existing pending appointments at this time slot
+    // This allows users to retry booking if payment failed
+    if (pendingAppointments.length > 0) {
+      for (const pending of pendingAppointments) {
+        await pool.execute(
+          `UPDATE appointments SET status = 'cancelled' WHERE id = ?`,
+          [pending.id]
+        );
+      }
+    }
+
+    const [insertResult] = await pool.execute(
       `INSERT INTO appointments 
         (patient_id, doctor_id, appointment_date, appointment_time, appointment_for, fee, payment_method, reason, notes, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
@@ -413,6 +445,11 @@ export const createAppointment = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Appointment request submitted successfully",
+      appointment: {
+        id: insertResult.insertId,
+        appointment_id: insertResult.insertId,
+        fee: doctor.fee,
+      },
       appointment_id: insertResult.insertId,
       fee: doctor.fee,
     });

@@ -10,6 +10,9 @@ import authRoutes from "./routes/authRoutes.js";
 import patientRoutes from "./routes/patientRoutes.js";
 import doctorRoutes from "./routes/doctorRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import chatRoutes from "./routes/chatRoutes.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
+import transactionRoutes from "./routes/transactionRoutes.js";
 
 // Swagger
 import { swaggerDocs } from "./config/swagger.js"; // corrected import path
@@ -47,6 +50,9 @@ app.use("/api/auth", authRoutes);
 app.use("/api/patient", patientRoutes);
 app.use("/api/doctor", doctorRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/payment", paymentRoutes);
+app.use("/api/transactions", transactionRoutes);
 
 
 

@@ -87,6 +87,9 @@ CREATE TABLE IF NOT EXISTS appointments (
   appointment_for VARCHAR(100) NOT NULL,
   reason TEXT,
   notes TEXT,
+  fee DECIMAL(10, 2),
+  payment_method ENUM('card','easypaisa','jazzcash','bank','cash','stripe','paypal') DEFAULT 'card',
+  payment_intent_id VARCHAR(255) NULL,
   status ENUM('pending','accepted','rejected','completed','cancelled') DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -94,7 +97,8 @@ CREATE TABLE IF NOT EXISTS appointments (
   FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
   INDEX idx_appointments_status (status),
   INDEX idx_appointments_doctor (doctor_id),
-  INDEX idx_appointments_patient (patient_id)
+  INDEX idx_appointments_patient (patient_id),
+  INDEX idx_appointments_payment_intent (payment_intent_id)
 );
 
 CREATE TABLE IF NOT EXISTS appointment_documents (
@@ -138,6 +142,45 @@ CREATE TABLE IF NOT EXISTS reviews (
   UNIQUE KEY uniq_review_appointment_patient (appointment_id, patient_id),
   INDEX idx_reviews_doctor (doctor_id),
   INDEX idx_reviews_doctor_rating (doctor_id, rating)
+);
+
+-- Chat System Tables
+CREATE TABLE IF NOT EXISTS chats (
+  chat_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  doctor_id BIGINT NOT NULL,
+  patient_id BIGINT NOT NULL,
+  last_message_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_chats_doctor (doctor_id),
+  INDEX idx_chats_patient (patient_id),
+  INDEX idx_chats_last_message (last_message_at),
+  UNIQUE KEY uniq_chat_doctor_patient (doctor_id, patient_id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  chat_id BIGINT NOT NULL,
+  sender_id BIGINT NOT NULL,
+  sender_role ENUM('doctor', 'patient') NOT NULL,
+  message_type ENUM('text', 'file', 'image') NOT NULL DEFAULT 'text',
+  message_text TEXT NULL,
+  file_url VARCHAR(500) NULL,
+  file_name VARCHAR(255) NULL,
+  file_type VARCHAR(50) NULL,
+  file_size INT(11) NULL,
+  is_read TINYINT(1) DEFAULT 0,
+  read_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE,
+  FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_messages_chat (chat_id),
+  INDEX idx_messages_sender (sender_id),
+  INDEX idx_messages_sender_role (sender_role),
+  INDEX idx_messages_is_read (is_read),
+  INDEX idx_messages_created_at (created_at)
 );
 
 SET FOREIGN_KEY_CHECKS = 1;
