@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_51SX6J2EFNWPnKNaO4LERRVuMnXYHCAHrzysujma0jexvVnNAnlHiQWbIAogp6Pg1MhkrQgJVbU24AP3BDherHH3M00mUsJuqGE", {
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY , {
   apiVersion: "2024-12-18.acacia",
 });
 
