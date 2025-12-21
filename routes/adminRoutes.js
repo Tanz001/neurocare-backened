@@ -18,6 +18,13 @@ import {
   getDashboardOverview,
   getDashboardMetrics,
 } from "../controllers/adminController.js";
+import {
+  getAllPlansAdmin,
+  getPlanByIdAdmin,
+  createPlan,
+  updatePlan,
+  deletePlan,
+} from "../controllers/adminProductController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { isAdmin } from "../middlewares/roleMiddleware.js";
 
@@ -52,6 +59,13 @@ router.patch("/appointments/:appointmentId/status", adminOnly, updateAppointment
 // Transaction routes
 router.get("/transactions", adminOnly, getTransactions);
 router.post("/transactions", adminOnly, createTransaction);
+
+// Plan management routes
+router.get("/plans", adminOnly, getAllPlansAdmin);
+router.get("/plans/:planId", adminOnly, getPlanByIdAdmin);
+router.post("/plans", adminOnly, createPlan);
+router.put("/plans/:planId", adminOnly, updatePlan);
+router.delete("/plans/:planId", adminOnly, deletePlan);
 
 export default router;
 

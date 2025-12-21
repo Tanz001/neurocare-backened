@@ -1,5 +1,6 @@
 import path from "path";
 import { query } from "../config/db.js";
+import { unlockServicesAfterNeurology } from "../services/productService.js";
 
 const dayFields = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const allowedAppointmentStatuses = ["pending", "accepted", "rejected", "completed", "cancelled"];
@@ -799,6 +800,26 @@ export const updateAppointment = async (req, res) => {
         success: false,
         message: "Appointment not found",
       });
+    }
+
+    // Si le rendez-vous est marqué comme complété et c'est une consultation neurologique,
+    // déverrouiller les services liés
+    if (status === 'completed') {
+      const [appointment] = await query(
+        `SELECT patient_id, service_type, purchase_id 
+         FROM appointments 
+         WHERE id = ?`,
+        [appointmentId]
+      );
+
+      if (appointment && appointment.service_type === 'neurology' && appointment.purchase_id) {
+        try {
+          await unlockServicesAfterNeurology(appointment.patient_id, appointment.purchase_id);
+        } catch (unlockError) {
+          console.error("Error unlocking services after neurology completion:", unlockError);
+          // Ne pas faire échouer la requête si le déverrouillage échoue
+        }
+      }
     }
 
     return res.status(200).json({

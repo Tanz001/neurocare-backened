@@ -159,6 +159,21 @@ export const login = async (req, res) => {
       });
     }
 
+    // Pour les patients, vérifier le statut de souscription
+    if (user.role === 'patient') {
+      // Vérifier si la colonne subscribed existe, sinon vérifier les achats actifs
+      const subscribed = user.subscribed === 1 || user.subscribed === true;
+      
+      if (!subscribed) {
+        return res.status(403).json({
+          success: false,
+          message: "You need to subscribe to a plan before you can login. Please purchase a subscription plan first.",
+          requires_plan: true,
+          subscribed: false,
+        });
+      }
+    }
+
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     if (!isPasswordValid) {
       return res.status(401).json({

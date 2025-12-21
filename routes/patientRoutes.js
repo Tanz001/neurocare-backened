@@ -11,6 +11,10 @@ import {
   getDashboardMetrics,
   checkReviewExists,
 } from "../controllers/patientController.js";
+import {
+  getMyPurchases,
+  getMyWallet,
+} from "../controllers/productController.js";
 
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { isPatient } from "../middlewares/roleMiddleware.js";
@@ -263,5 +267,29 @@ router.get("/dashboard/metrics", patientOnly, getDashboardMetrics);
  *         description: Review status retrieved
  */
 router.get("/appointments/:appointmentId/review", patientOnly, checkReviewExists);
+
+/**
+ * @swagger
+ * /patient/purchases:
+ *   get:
+ *     summary: Get patient's purchases
+ *     tags: [Patients]
+ *     responses:
+ *       200:
+ *         description: Purchases fetched successfully
+ */
+router.get("/purchases", patientOnly, getMyPurchases);
+
+/**
+ * @swagger
+ * /patient/wallet:
+ *   get:
+ *     summary: Get patient's service wallet (available sessions)
+ *     tags: [Patients]
+ *     responses:
+ *       200:
+ *         description: Wallet fetched successfully
+ */
+router.get("/wallet", patientOnly, getMyWallet);
 
 export default router;

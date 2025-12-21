@@ -2,7 +2,9 @@ import express from "express";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import {
   createPaymentIntent,
-  confirmPayment,
+  createPlanPaymentIntent,
+  createPlanPaymentIntentNoAuth,
+  confirmPlanPayment,
   stripeWebhook,
 } from "../controllers/paymentController.js";
 
@@ -49,6 +51,42 @@ router.post("/create-intent", authMiddleware, createPaymentIntent);
 
 /**
  * @swagger
+ * /payment/create-checkout-session:
+ *   post:
+ *     summary: Create Stripe Checkout Session for plan purchase
+ *     tags: [Payment]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - product_id
+ *             properties:
+ *               product_id:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Checkout session created successfully
+ *       400:
+ *         description: Invalid request
+ *       404:
+ *         description: Subscription plan not found
+ */
+// Plan purchase - Payment Intent (authenticated)
+router.post("/create-plan-intent", authMiddleware, createPlanPaymentIntent);
+
+// Plan purchase - Payment Intent (no auth - for users who just signed up)
+router.post("/create-plan-intent-noauth", createPlanPaymentIntentNoAuth);
+
+// Confirm plan payment and store data (no auth required - uses metadata from payment intent)
+router.post("/confirm-plan", confirmPlanPayment);
+
+/**
+ * @swagger
  * /payment/confirm:
  *   post:
  *     summary: Confirm payment
@@ -75,7 +113,7 @@ router.post("/create-intent", authMiddleware, createPaymentIntent);
  *       400:
  *         description: Invalid request
  */
-router.post("/confirm", authMiddleware, confirmPayment);
+// router.post("/confirm", authMiddleware, confirmPayment);
 
 /**
  * @swagger
@@ -90,5 +128,12 @@ router.post("/confirm", authMiddleware, confirmPayment);
 router.post("/webhook", express.raw({ type: "application/json" }), stripeWebhook);
 
 export default router;
+
+
+
+
+
+
+
 
 

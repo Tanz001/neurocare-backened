@@ -1,444 +1,515 @@
-import Stripe from "stripe";
-import { query } from "../config/db.js";
-import pool from "../config/db.js";
-import dotenv from "dotenv";
+import Stripe from 'stripe';
+import dotenv from 'dotenv';
+import { query } from '../config/db.js';
+import pool from '../config/db.js';
+import { calculateCommission } from '../services/productService.js';
 
 dotenv.config();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY , {
-  apiVersion: "2024-12-18.acacia",
-});
+/**
+ * Stripe instance
+ */
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /**
- * Create Stripe payment intent for appointment
+ * IMPORTANT
+ * Frontend is running on PORT 8080
+ * Never fallback to backend or 3000
  */
+const FRONTEND_URL = process.env.FRONTEND_URL; // http://localhost:8080
+
+if (!FRONTEND_URL) {
+  throw new Error('FRONTEND_URL is not defined in .env');
+}
+
+/* =====================================================
+   APPOINTMENT PAYMENT (PAYMENT INTENT)
+===================================================== */
+
 export const createPaymentIntent = async (req, res) => {
   try {
-    const userId = req.user.id;
     const { appointment_id, amount } = req.body;
+    const patientId = req.user.id;
 
     if (!appointment_id || !amount) {
       return res.status(400).json({
         success: false,
-        message: "appointment_id and amount are required",
+        message: 'appointment_id and amount are required',
       });
     }
 
-    // Verify appointment belongs to user
     const [appointment] = await query(
-      `SELECT id, patient_id, doctor_id, fee, status 
-       FROM appointments 
+      `SELECT id, doctor_id, patient_id, fee, status
+       FROM appointments
        WHERE id = ? AND patient_id = ?`,
-      [appointment_id, userId]
+      [appointment_id, patientId]
     );
 
     if (!appointment) {
       return res.status(404).json({
         success: false,
-        message: "Appointment not found",
+        message: 'Appointment not found',
       });
     }
 
-    if (appointment.status !== "pending") {
+    if (appointment.status !== 'pending') {
       return res.status(400).json({
         success: false,
-        message: "Appointment is not in pending status",
+        message: 'Appointment is not pending payment',
       });
     }
 
-    // Validate amount matches appointment fee
-    const appointmentFee = parseFloat(appointment.fee) || 0;
-    const requestedAmount = parseFloat(amount);
-
-    if (requestedAmount !== appointmentFee) {
-      return res.status(400).json({
-        success: false,
-        message: "Amount does not match appointment fee",
-      });
-    }
-
-    // Create payment intent
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(requestedAmount * 100), // Convert to cents
-      currency: "usd",
+      amount: Math.round(parseFloat(amount) * 100),
+      currency: 'eur',
       metadata: {
         appointment_id: appointment_id.toString(),
-        patient_id: userId.toString(),
+        patient_id: patientId.toString(),
         doctor_id: appointment.doctor_id.toString(),
       },
     });
 
-    // Update appointment with payment intent ID (if column exists)
-    try {
-      await pool.execute(
-        `UPDATE appointments 
-         SET payment_intent_id = ? 
-         WHERE id = ?`,
-        [paymentIntent.id, appointment_id]
-      );
-    } catch (error) {
-      // If column doesn't exist, log warning but continue
-      if (error.code === 'ER_BAD_FIELD_ERROR') {
-        console.warn("payment_intent_id column does not exist. Please run the migration script: database/migrations/add_payment_intent_to_appointments.sql");
-      } else {
-        throw error;
-      }
-    }
+    await query(
+      `UPDATE appointments SET payment_intent_id = ? WHERE id = ?`,
+      [paymentIntent.id, appointment_id]
+    );
 
-    res.json({
+    res.status(200).json({
       success: true,
       client_secret: paymentIntent.client_secret,
       payment_intent_id: paymentIntent.id,
     });
   } catch (error) {
-    console.error("Error creating payment intent:", error);
+    console.error('Error creating payment intent:', error);
     res.status(500).json({
       success: false,
-      message: "Failed to create payment intent",
+      message: 'Failed to create payment intent',
+    });
+  }
+};
+
+/* =====================================================
+   PLAN PURCHASE - PAYMENT INTENT (AUTHENTICATED)
+===================================================== */
+
+export const createPlanPaymentIntent = async (req, res) => {
+  try {
+    const { product_id } = req.body;
+    const patientId = req.user.id;
+
+    if (!product_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'product_id is required',
+      });
+    }
+
+    const [product] = await query(
+      `SELECT id, name, price
+       FROM products
+       WHERE id = ? AND active = 1 AND product_type = 'subscription_plan'`,
+      [product_id]
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Subscription plan not found',
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(parseFloat(product.price) * 100),
+      currency: 'eur',
+      metadata: {
+        product_id: product_id.toString(),
+        patient_id: patientId.toString(),
+        purchase_type: 'subscription_plan',
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      client_secret: paymentIntent.client_secret,
+      payment_intent_id: paymentIntent.id,
+    });
+  } catch (error) {
+    console.error('Error creating plan payment intent:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create payment intent',
+    });
+  }
+};
+
+/* =====================================================
+   PLAN PURCHASE - PAYMENT INTENT (NO AUTH)
+===================================================== */
+
+export const createPlanPaymentIntentNoAuth = async (req, res) => {
+  try {
+    const { product_id, email } = req.body;
+
+    if (!product_id || !email) {
+      return res.status(400).json({
+        success: false,
+        message: 'product_id and email are required',
+      });
+    }
+
+    const [product] = await query(
+      `SELECT id, name, price
+       FROM products
+       WHERE id = ? AND active = 1 AND product_type = 'subscription_plan'`,
+      [product_id]
+    );
+
+    const [user] = await query(
+      `SELECT id, email FROM users WHERE email = ? AND role = 'patient'`,
+      [email.toLowerCase()]
+    );
+
+    if (!product || !user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User or product not found',
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(parseFloat(product.price) * 100),
+      currency: 'eur',
+      metadata: {
+        product_id: product_id.toString(),
+        patient_id: user.id.toString(),
+        purchase_type: 'subscription_plan',
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      client_secret: paymentIntent.client_secret,
+      payment_intent_id: paymentIntent.id,
+    });
+  } catch (error) {
+    console.error('Error creating plan payment intent (no auth):', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create payment intent',
+    });
+  }
+};
+
+/* =====================================================
+   PLAN PURCHASE - CONFIRM PAYMENT & STORE DATA
+===================================================== */
+
+export const confirmPlanPayment = async (req, res) => {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const { payment_intent_id } = req.body;
+    const patientId = req.user ? req.user.id : null;
+
+    if (!payment_intent_id) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: 'payment_intent_id is required',
+      });
+    }
+
+    // Récupérer le patient_id depuis les metadata du payment intent
+    const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+
+    if (paymentIntent.status !== 'succeeded') {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: `Payment intent status is ${paymentIntent.status}, not succeeded`,
+      });
+    }
+
+    const productId = Number(paymentIntent.metadata.product_id);
+    const metadataPatientId = Number(paymentIntent.metadata.patient_id);
+
+    // Utiliser patient_id depuis metadata ou depuis req.user
+    const finalPatientId = patientId || metadataPatientId;
+
+    if (!finalPatientId) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: 'Patient ID not found',
+      });
+    }
+
+    // Vérifier si l'achat n'existe pas déjà (idempotent)
+    const [existing] = await connection.execute(
+      `SELECT id FROM patient_purchases
+       WHERE patient_id = ? AND product_id = ? AND status = 'active'`,
+      [finalPatientId, productId]
+    );
+
+    if (existing.length > 0) {
+      await connection.commit();
+      connection.release();
+      return res.status(200).json({
+        success: true,
+        message: 'Purchase already exists',
+        purchase_id: existing[0].id,
+      });
+    }
+
+    // Récupérer les détails du produit
+    const [products] = await connection.execute(
+      `SELECT * FROM products WHERE id = ?`,
+      [productId]
+    );
+
+    if (!products || products.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+      });
+    }
+
+    const amount = paymentIntent.amount / 100;
+    const commission = await calculateCommission(productId, 'first', amount);
+
+    // Créer l'entrée patient_purchases
+    const [purchaseResult] = await connection.execute(
+      `INSERT INTO patient_purchases
+       (patient_id, product_id, total_paid, platform_fee, professional_pool, status)
+       VALUES (?, ?, ?, ?, ?, 'active')`,
+      [finalPatientId, productId, amount, commission.platformFee, commission.professionalEarning]
+    );
+
+    const purchaseId = purchaseResult.insertId;
+
+    // Récupérer les services du produit
+    const [productServices] = await connection.execute(
+      `SELECT * FROM product_services WHERE product_id = ?`,
+      [productId]
+    );
+
+    // Créer les entrées wallet pour chaque service
+    for (const service of productServices) {
+      // Neurologie est déverrouillée initialement, autres services sont verrouillés selon is_locked
+      const isLocked = service.service_type === 'neurology' ? 0 : service.is_locked;
+
+      await connection.execute(
+        `INSERT INTO patient_service_wallet
+         (patient_id, purchase_id, service_type, remaining_sessions, is_locked)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          finalPatientId,
+          purchaseId,
+          service.service_type,
+          service.session_count,
+          isLocked,
+        ]
+      );
+    }
+
+    // Créer la transaction avec transaction_type='plan_purchase'
+    await connection.execute(
+      `INSERT INTO transactions
+       (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+        product_id, purchase_id, platform_fee, professional_earning)
+       VALUES ('plan_purchase', NULL, ?, NULL, ?, 'card', 'paid', ?, ?, ?, ?)`,
+      [
+        finalPatientId,
+        amount,
+        productId,
+        purchaseId,
+        commission.platformFee,
+        commission.professionalEarning,
+      ]
+    );
+
+    // Activer l'abonnement du patient
+    await connection.execute(
+      `UPDATE users SET subscribed = 1 WHERE id = ?`,
+      [finalPatientId]
+    );
+
+    await connection.commit();
+    connection.release();
+
+    console.log(`✅ Plan purchase confirmed: Patient ${finalPatientId}, Product ${productId}, Purchase ID ${purchaseId}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Plan purchase confirmed successfully',
+      purchase_id: purchaseId,
+    });
+  } catch (error) {
+    await connection.rollback();
+    connection.release();
+    console.error('Error confirming plan payment:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to confirm plan payment',
       error: error.message,
     });
   }
 };
 
-/**
- * Confirm payment and update appointment status
- */
-export const confirmPayment = async (req, res) => {
+/* =====================================================
+   STRIPE WEBHOOK (OPTIONAL - NOT USED FOR PLANS)
+===================================================== */
+
+export const stripeWebhook = async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
   try {
-    const userId = req.user.id;
-    const { payment_intent_id, appointment_id } = req.body;
-
-    if (!payment_intent_id || !appointment_id) {
-      return res.status(400).json({
-        success: false,
-        message: "payment_intent_id and appointment_id are required",
-      });
-    }
-
-    // Retrieve payment intent from Stripe
-    const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
-
-    // Verify payment intent belongs to user's appointment
-    // Check if payment_intent_id column exists, if not, select without it
-    const [appointment] = await query(
-      `SELECT id, patient_id, status 
-       FROM appointments 
-       WHERE id = ? AND patient_id = ?`,
-      [appointment_id, userId]
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
     );
+  } catch (err) {
+    console.error('Webhook signature error:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
 
-    if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        message: "Appointment not found",
-      });
-    }
+  const connection = await pool.getConnection();
 
-    // Try to get payment_intent_id if column exists
-    try {
-      const [appointmentWithPayment] = await query(
-        `SELECT payment_intent_id 
-         FROM appointments 
-         WHERE id = ?`,
-        [appointment_id]
-      );
-      
-      if (appointmentWithPayment && appointmentWithPayment.payment_intent_id && 
-          appointmentWithPayment.payment_intent_id !== payment_intent_id) {
-        return res.status(400).json({
-          success: false,
-          message: "Payment intent does not match appointment",
-        });
-      }
-    } catch (error) {
-      // Column doesn't exist, skip validation
-      console.log("payment_intent_id column not found, skipping validation");
-    }
+  try {
+    console.log('📥 Webhook received:', event.type);
 
-    // Check if payment has already been confirmed
-    if (appointment.status === "accepted") {
-      // Check if transaction already exists
-      const [existingTransaction] = await query(
-        `SELECT id FROM transactions WHERE appointment_id = ? AND status = 'paid'`,
-        [appointment_id]
-      );
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      console.log('💳 Checkout session completed:', session.id);
+      console.log('📋 Metadata:', session.metadata);
 
-      if (existingTransaction) {
-        // Payment already confirmed, return success
-        return res.json({
-          success: true,
-          message: "Payment already confirmed",
-          appointment_id: appointment_id,
-        });
-      }
-    }
-
-    // Check payment status
-    if (paymentIntent.status === "succeeded") {
-      // Check if appointment is already accepted (idempotency)
-      if (appointment.status !== "accepted") {
-        // Update appointment status
-        await pool.execute(
-          `UPDATE appointments 
-           SET status = 'accepted' 
-           WHERE id = ?`,
-          [appointment_id]
-        );
+      // Vérifier que c'est bien un achat de plan
+      const purchaseType = session.metadata.purchase_type;
+      if (purchaseType !== 'subscription_plan') {
+        console.log('⚠️ Not a subscription plan purchase, skipping');
+        connection.release();
+        return res.json({ received: true });
       }
 
-      // Check if transaction already exists
-      const [existingTransaction] = await query(
-        `SELECT id FROM transactions WHERE appointment_id = ? AND status = 'paid'`,
-        [appointment_id]
+      const productId = Number(session.metadata.product_id);
+      const patientId = Number(session.metadata.patient_id);
+      console.log(`🛒 Processing purchase: Patient ${patientId}, Product ${productId}`);
+
+      await connection.beginTransaction();
+
+      // Vérifier si l'achat n'existe pas déjà (idempotent)
+      const [existing] = await connection.execute(
+        `SELECT id FROM patient_purchases
+         WHERE patient_id = ? AND product_id = ? AND status = 'active'`,
+        [patientId, productId]
       );
 
-      if (!existingTransaction) {
-        // Create transaction record only if it doesn't exist
-        const [appointmentDetails] = await query(
-          `SELECT doctor_id, fee, payment_method 
-           FROM appointments 
-           WHERE id = ?`,
-          [appointment_id]
-        );
+      if (existing.length > 0) {
+        await connection.commit();
+        connection.release();
+        return res.json({ received: true });
+      }
 
-        // Map payment_method: 'stripe' -> 'card', 'paypal' -> 'card', ensure it's valid for ENUM
-        let paymentMethod = appointmentDetails.payment_method || "card";
-        if (paymentMethod === "stripe" || paymentMethod === "paypal") {
-          paymentMethod = "card"; // Map to 'card' for transactions table ENUM
-        }
-        // Ensure payment_method is one of the valid ENUM values
-        const validMethods = ["card", "easypaisa", "jazzcash", "bank", "cash"];
-        if (!validMethods.includes(paymentMethod)) {
-          paymentMethod = "card";
-        }
-        // Truncate if too long (for VARCHAR columns)
-        if (paymentMethod.length > 30) {
-          paymentMethod = paymentMethod.substring(0, 30);
-        }
+      // Récupérer les détails du produit
+      const [products] = await connection.execute(
+        `SELECT * FROM products WHERE id = ?`,
+        [productId]
+      );
 
-        await pool.execute(
-          `INSERT INTO transactions 
-           (appointment_id, patient_id, doctor_id, amount, payment_method, status) 
-           VALUES (?, ?, ?, ?, ?, 'paid')`,
+      if (!products || products.length === 0) {
+        await connection.rollback();
+        connection.release();
+        console.error('Product not found:', productId);
+        return res.status(400).json({ error: 'Product not found' });
+      }
+
+      const amount = session.amount_total / 100;
+      const commission = await calculateCommission(productId, 'first', amount);
+
+      // Créer l'entrée patient_purchases
+      const [purchaseResult] = await connection.execute(
+        `INSERT INTO patient_purchases
+         (patient_id, product_id, total_paid, platform_fee, professional_pool, status)
+         VALUES (?, ?, ?, ?, ?, 'active')`,
+        [patientId, productId, amount, commission.platformFee, commission.professionalEarning]
+      );
+
+      const purchaseId = purchaseResult.insertId;
+
+      // Récupérer les services du produit
+      const [productServices] = await connection.execute(
+        `SELECT * FROM product_services WHERE product_id = ?`,
+        [productId]
+      );
+
+      // Créer les entrées wallet pour chaque service
+      for (const service of productServices) {
+        // Neurologie est déverrouillée initialement, autres services sont verrouillés selon is_locked
+        const isLocked = service.service_type === 'neurology' ? 0 : service.is_locked;
+
+        await connection.execute(
+          `INSERT INTO patient_service_wallet
+           (patient_id, purchase_id, service_type, remaining_sessions, is_locked)
+           VALUES (?, ?, ?, ?, ?)`,
           [
-            appointment_id,
-            userId,
-            appointmentDetails.doctor_id,
-            appointmentDetails.fee,
-            paymentMethod,
+            patientId,
+            purchaseId,
+            service.service_type,
+            service.session_count,
+            isLocked,
           ]
         );
       }
 
-      res.json({
-        success: true,
-        message: "Payment confirmed successfully",
-        appointment_id: appointment_id,
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        message: `Payment not completed. Status: ${paymentIntent.status}`,
-      });
+      // Créer la transaction avec transaction_type='plan_purchase'
+      await connection.execute(
+        `INSERT INTO transactions
+         (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+          product_id, purchase_id, platform_fee, professional_earning)
+         VALUES ('plan_purchase', NULL, ?, NULL, ?, 'card', 'paid', ?, ?, ?, ?)`,
+        [
+          patientId,
+          amount,
+          productId,
+          purchaseId,
+          commission.platformFee,
+          commission.professionalEarning,
+        ]
+      );
+
+      // Activer l'abonnement du patient
+      await connection.execute(
+        `UPDATE users SET subscribed = 1 WHERE id = ?`,
+        [patientId]
+      );
+
+      await connection.commit();
+      connection.release();
+ 
+      console.log(`✅ Purchase completed successfully!`);
+      console.log(`   - Patient ID: ${patientId}`);
+      console.log(`   - Product ID: ${productId}`);
+      console.log(`   - Purchase ID: ${purchaseId}`);
+      console.log(`   - Amount: €${amount}`);
+      console.log(`   - Wallet entries created: ${productServices.length}`);
+      return res.json({ received: true });
     }
+
+    console.log('ℹ️ Event type not handled:', event.type);
+    res.json({ received: true });
   } catch (error) {
-    console.error("Error confirming payment:", error);
-    
-    // Handle Stripe-specific errors
-    if (error.type === "StripeInvalidRequestError") {
-      if (error.code === "payment_intent_unexpected_state") {
-        // Payment intent already succeeded, check if we can still process it
-        const paymentIntent = error.payment_intent;
-        if (paymentIntent && paymentIntent.status === "succeeded") {
-          // Try to confirm anyway (idempotency check will handle it)
-          try {
-            const [appointment] = await query(
-              `SELECT id, status FROM appointments WHERE id = ? AND patient_id = ?`,
-              [appointment_id, userId]
-            );
-            
-            if (appointment && appointment.status !== "accepted") {
-              // Update appointment and create transaction
-              await pool.execute(
-                `UPDATE appointments SET status = 'accepted' WHERE id = ?`,
-                [appointment_id]
-              );
-              
-              const [appointmentDetails] = await query(
-                `SELECT doctor_id, fee, payment_method FROM appointments WHERE id = ?`,
-                [appointment_id]
-              );
-              
-              const [existingTransaction] = await query(
-                `SELECT id FROM transactions WHERE appointment_id = ? AND status = 'paid'`,
-                [appointment_id]
-              );
-              
-              if (!existingTransaction) {
-                let paymentMethod = appointmentDetails.payment_method || "card";
-                if (paymentMethod === "stripe" || paymentMethod === "paypal") {
-                  paymentMethod = "card";
-                }
-                const validMethods = ["card", "easypaisa", "jazzcash", "bank", "cash"];
-                if (!validMethods.includes(paymentMethod)) {
-                  paymentMethod = "card";
-                }
-                if (paymentMethod.length > 30) {
-                  paymentMethod = paymentMethod.substring(0, 30);
-                }
-                
-                await pool.execute(
-                  `INSERT INTO transactions 
-                   (appointment_id, patient_id, doctor_id, amount, payment_method, status) 
-                   VALUES (?, ?, ?, ?, ?, 'paid')`,
-                  [appointment_id, userId, appointmentDetails.doctor_id, appointmentDetails.fee, paymentMethod]
-                );
-              }
-              
-              return res.json({
-                success: true,
-                message: "Payment confirmed successfully",
-                appointment_id: appointment_id,
-              });
-            } else {
-              return res.json({
-                success: true,
-                message: "Payment already confirmed",
-                appointment_id: appointment_id,
-              });
-            }
-          } catch (innerError) {
-            console.error("Error handling already succeeded payment:", innerError);
-          }
-        }
-      }
-      
-      return res.status(400).json({
-        success: false,
-        message: error.message || "Payment confirmation failed",
-        error: error.code || error.type,
-      });
-    }
-    
-    res.status(500).json({
-      success: false,
-      message: "Failed to confirm payment",
-      error: error.message,
-    });
+    await connection.rollback();
+    connection.release();
+    console.error('Webhook error:', error);
+    res.status(500).json({ error: 'Webhook failed' });
   }
 };
-
-/**
- * Webhook handler for Stripe events
- */
-export const stripeWebhook = async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  let event;
-
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-  } catch (err) {
-    console.error("Webhook signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // Handle the event
-  switch (event.type) {
-    case "payment_intent.succeeded":
-      const paymentIntent = event.data.object;
-      const appointmentId = paymentIntent.metadata.appointment_id;
-
-      if (appointmentId) {
-        try {
-          // Update appointment status
-          // Check if payment_intent_id column exists
-          try {
-            await pool.execute(
-              `UPDATE appointments 
-               SET status = 'accepted' 
-               WHERE id = ? AND payment_intent_id = ?`,
-              [appointmentId, paymentIntent.id]
-            );
-          } catch (error) {
-            // If column doesn't exist, update without payment_intent_id check
-            if (error.code === 'ER_BAD_FIELD_ERROR') {
-              await pool.execute(
-                `UPDATE appointments 
-                 SET status = 'accepted' 
-                 WHERE id = ?`,
-                [appointmentId]
-              );
-            } else {
-              throw error;
-            }
-          }
-
-          // Create transaction record
-          const [appointment] = await query(
-            `SELECT patient_id, doctor_id, fee, payment_method 
-             FROM appointments 
-             WHERE id = ?`,
-            [appointmentId]
-          );
-
-          if (appointment) {
-            await pool.execute(
-              `INSERT INTO transactions 
-               (appointment_id, patient_id, doctor_id, amount, payment_method, status) 
-               VALUES (?, ?, ?, ?, ?, 'paid')`,
-              [
-                appointmentId,
-                appointment.patient_id,
-                appointment.doctor_id,
-                appointment.fee,
-                appointment.payment_method || "card",
-              ]
-            );
-          }
-        } catch (error) {
-          console.error("Error processing webhook:", error);
-        }
-      }
-      break;
-
-    case "payment_intent.payment_failed":
-      const failedPayment = event.data.object;
-      const failedAppointmentId = failedPayment.metadata.appointment_id;
-
-      if (failedAppointmentId) {
-        try {
-          try {
-            await pool.execute(
-              `UPDATE appointments 
-               SET status = 'pending' 
-               WHERE id = ? AND payment_intent_id = ?`,
-              [failedAppointmentId, failedPayment.id]
-            );
-          } catch (error) {
-            // If column doesn't exist, update without payment_intent_id check
-            if (error.code === 'ER_BAD_FIELD_ERROR') {
-              await pool.execute(
-                `UPDATE appointments 
-                 SET status = 'pending' 
-                 WHERE id = ?`,
-                [failedAppointmentId]
-              );
-            } else {
-              throw error;
-            }
-          }
-        } catch (error) {
-          console.error("Error processing failed payment webhook:", error);
-        }
-      }
-      break;
-
-    default:
-      console.log(`Unhandled event type ${event.type}`);
-  }
-
-  res.json({ received: true });
-};
-

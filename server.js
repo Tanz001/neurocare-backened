@@ -3,7 +3,6 @@ import dotenv from "dotenv";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
-import db from "./config/db.js";
 
 // Routes
 import authRoutes from "./routes/authRoutes.js";
@@ -13,9 +12,13 @@ import adminRoutes from "./routes/adminRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import transactionRoutes from "./routes/transactionRoutes.js";
+import productRoutes from "./routes/productRoutes.js";
+
+// Stripe webhook controller
+import { stripeWebhook } from "./controllers/paymentController.js";
 
 // Swagger
-import { swaggerDocs } from "./config/swagger.js"; // corrected import path
+import { swaggerDocs } from "./config/swagger.js";
 
 // Middleware
 import { loggerMiddleware, errorLogger } from "./middlewares/loggerMiddleware.js";
@@ -27,25 +30,34 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// ----------------------
-// Middleware
-// ----------------------
+/* =====================================================
+   STRIPE WEBHOOK (RAW BODY - MUST BE FIRST)
+===================================================== */
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhook
+);
+
+/* =====================================================
+   GLOBAL MIDDLEWARE
+===================================================== */
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // SAFE now
 app.use(express.urlencoded({ extended: true }));
 
-// Logger middleware (after body parsers, before routes)
+// Logger
 app.use(loggerMiddleware);
 
-// Serve static files (profile images, documents)
+// Static files
 app.use("/assets", express.static(path.join(__dirname, "assets")));
 
-// Swagger Documentation
-swaggerDocs(app); // setup Swagger using your swaggerDocs function
+// Swagger
+swaggerDocs(app);
 
-// ----------------------
-// Routes
-// ----------------------
+/* =====================================================
+   ROUTES
+===================================================== */
 app.use("/api/auth", authRoutes);
 app.use("/api/patient", patientRoutes);
 app.use("/api/doctor", doctorRoutes);
@@ -53,11 +65,11 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/transactions", transactionRoutes);
+app.use("/api", productRoutes);
 
-
-
-
-// Root route
+/* =====================================================
+   ROOT
+===================================================== */
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -65,7 +77,9 @@ app.get("/", (req, res) => {
   });
 });
 
-// 404 handler
+/* =====================================================
+   404 HANDLER
+===================================================== */
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -74,7 +88,7 @@ app.use((req, res) => {
   });
 });
 
-// Error logger middleware
+// Error logger
 app.use(errorLogger);
 
 // Global error handler
@@ -86,9 +100,9 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ----------------------
-// Start Server
-// ----------------------
+/* =====================================================
+   START SERVER
+===================================================== */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

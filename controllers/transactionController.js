@@ -8,122 +8,108 @@ import { query } from "../config/db.js";
  */
 export const getTransactions = async (req, res) => {
   try {
-    const userId = parseInt(req.user.id);
-    const userRole = req.user.role?.toLowerCase();
+    const userId = Number(req.user.id);
+    const role = req.user.role?.toLowerCase();
     const { status, start_date, end_date } = req.query;
 
-    if (isNaN(userId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user ID",
-      });
-    }
-
-    let whereConditions = [];
+    let conditions = [];
     let params = [];
 
-    // Filter by role
-    if (userRole === "patient") {
-      whereConditions.push("t.patient_id = ?");
+    // Role filtering
+    if (role === "patient") {
+      conditions.push("t.patient_id = ?");
       params.push(userId);
-    } else if (userRole === "doctor") {
-      whereConditions.push("t.doctor_id = ?");
+    } 
+    else if (role === "doctor") {
+      conditions.push("t.doctor_id = ?");
       params.push(userId);
-    } else if (userRole === "admin") {
-      // Admins see all transactions, no filter needed
-    } else {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized access",
-      });
+    } 
+    else if (role !== "admin") {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
     }
 
-    // Filter by status if provided
+    // Optional filters
     if (status) {
-      whereConditions.push("t.status = ?");
+      conditions.push("t.status = ?");
       params.push(status);
     }
 
-    // Filter by date range if provided
     if (start_date) {
-      whereConditions.push("DATE(t.created_at) >= ?");
+      conditions.push("DATE(t.created_at) >= ?");
       params.push(start_date);
     }
 
     if (end_date) {
-      whereConditions.push("DATE(t.created_at) <= ?");
+      conditions.push("DATE(t.created_at) <= ?");
       params.push(end_date);
     }
 
-    const whereClause = whereConditions.length > 0 
-      ? `WHERE ${whereConditions.join(" AND ")}`
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
       : "";
 
     const transactions = await query(
-      `SELECT 
+      `
+      SELECT
         t.id,
-        t.appointment_id,
-        t.patient_id,
-        t.doctor_id,
         t.amount,
-        t.payment_method,
         t.status,
         t.created_at,
+        t.payment_method,
+
+        -- PLAN / PRODUCT
+        pr.name AS product_name,
+        pr.product_type,
+        t.product_id,
+        t.purchase_id,
+
+        -- DOCTOR (only for paid appointments)
+        d.id AS doctor_id,
         d.full_name AS doctor_name,
-        d.profile_image_url AS doctor_profile,
-        d.speciality AS doctor_speciality,
-        p.full_name AS patient_name,
-        p.profile_image_url AS patient_profile,
+        d.speciality,
+
+        -- APPOINTMENT (optional)
         a.appointment_date,
         a.appointment_time,
-        a.appointment_for,
-        a.status AS appointment_status
-       FROM transactions t
-       INNER JOIN users d ON d.id = t.doctor_id
-       INNER JOIN users p ON p.id = t.patient_id
-       LEFT JOIN appointments a ON a.id = t.appointment_id
-       ${whereClause}
-       ORDER BY t.created_at DESC`,
+        a.service_type,
+
+        -- PATIENT
+        p.full_name AS patient_name
+
+      FROM transactions t
+      INNER JOIN users p ON p.id = t.patient_id
+      LEFT JOIN products pr ON pr.id = t.product_id
+      LEFT JOIN appointments a ON a.id = t.appointment_id
+      LEFT JOIN users d ON d.id = t.doctor_id
+      ${whereClause}
+      ORDER BY t.created_at DESC
+      `,
       params
     );
 
-    // Calculate summary statistics
-    const summary = await query(
-      `SELECT 
-        COUNT(*) as total_count,
-        SUM(CASE WHEN t.status = 'paid' THEN 1 ELSE 0 END) as paid_count,
-        SUM(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
-        SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-        SUM(CASE WHEN t.status = 'refunded' THEN 1 ELSE 0 END) as refunded_count,
-        SUM(CASE WHEN t.status = 'paid' THEN t.amount ELSE 0 END) as total_paid,
-        SUM(t.amount) as total_amount
-       FROM transactions t
-       ${whereClause}`,
+    const [summary] = await query(
+      `
+      SELECT
+        COUNT(*) total_count,
+        SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) total_paid
+      FROM transactions t
+      ${whereClause}
+      `,
       params
     );
 
-    return res.status(200).json({
+    res.json({
       success: true,
-      transactions: transactions || [],
-      summary: summary[0] || {
-        total_count: 0,
-        paid_count: 0,
-        pending_count: 0,
-        failed_count: 0,
-        refunded_count: 0,
-        total_paid: 0,
-        total_amount: 0,
-      },
+      transactions,
+      summary
     });
-  } catch (error) {
-    console.error("getTransactions error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch transactions",
-      error: error.message,
-    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Failed to fetch transactions" });
   }
 };
+
 
 /**
  * Get a single transaction by ID
@@ -206,5 +192,14 @@ export const getTransactionById = async (req, res) => {
     });
   }
 };
+
+
+
+
+
+
+
+
+
 
 
