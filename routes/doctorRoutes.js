@@ -23,9 +23,18 @@ import {
   getDashboardMetrics,
   getAppointmentReview,
 } from "../controllers/doctorController.js";
+import {
+  createCarePlan,
+  getCarePlanById,
+  getDoctorCarePlans,
+  updateCarePlan,
+  checkCarePlanExists,
+  uploadCarePlanDocument,
+  deleteCarePlanDocument,
+} from "../controllers/carePlanController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { isDoctor } from "../middlewares/roleMiddleware.js";
-import { documentUpload, doctorDocumentUpload } from "../middlewares/uploadMiddleware.js";
+import { documentUpload, doctorDocumentUpload, carePlanDocumentUpload } from "../middlewares/uploadMiddleware.js";
 
 const router = express.Router();
 const doctorOnly = [authMiddleware, isDoctor];
@@ -582,5 +591,100 @@ router.delete("/documents/:documentId", doctorOnly, deleteDoctorDocument);
  *         description: Dashboard metrics retrieved
  */
 router.get("/dashboard/metrics", doctorOnly, getDashboardMetrics);
+
+/**
+ * ----------------------------
+ * Care Plan Routes
+ * ----------------------------
+ */
+
+/**
+ * @swagger
+ * /doctor/care-plans:
+ *   get:
+ *     summary: Get all care plans created by doctor
+ *     tags: [Doctor]
+ *     responses:
+ *       200:
+ *         description: Care plans fetched successfully
+ */
+router.get("/care-plans", doctorOnly, getDoctorCarePlans);
+
+/**
+ * @swagger
+ * /doctor/care-plans/check/:appointmentId:
+ *   get:
+ *     summary: Check if care plan exists for appointment
+ *     tags: [Doctor]
+ *     responses:
+ *       200:
+ *         description: Check result
+ */
+router.get("/care-plans/check/:appointmentId", doctorOnly, checkCarePlanExists);
+
+/**
+ * @swagger
+ * /doctor/care-plans:
+ *   post:
+ *     summary: Create a new care plan
+ *     tags: [Doctor]
+ *     responses:
+ *       201:
+ *         description: Care plan created successfully
+ */
+router.post("/care-plans", doctorOnly, createCarePlan);
+
+/**
+ * @swagger
+ * /doctor/care-plans/:carePlanId:
+ *   get:
+ *     summary: Get care plan by ID
+ *     tags: [Doctor]
+ *     responses:
+ *       200:
+ *         description: Care plan fetched successfully
+ */
+router.get("/care-plans/:carePlanId", doctorOnly, getCarePlanById);
+
+/**
+ * @swagger
+ * /doctor/care-plans/:carePlanId:
+ *   put:
+ *     summary: Update care plan
+ *     tags: [Doctor]
+ *     responses:
+ *       200:
+ *         description: Care plan updated successfully
+ */
+router.put("/care-plans/:carePlanId", doctorOnly, updateCarePlan);
+
+/**
+ * @swagger
+ * /doctor/care-plans/:carePlanId/documents:
+ *   post:
+ *     summary: Upload document for care plan
+ *     tags: [Doctor]
+ *     responses:
+ *       201:
+ *         description: Document uploaded successfully
+ */
+router.post(
+  "/care-plans/:carePlanId/documents",
+  doctorOnly,
+  carePlanDocumentUpload.single("file"),
+  uploadCarePlanDocument
+);
+
+/**
+ * @swagger
+ * /doctor/care-plans/documents/:attachmentId:
+ *   delete:
+ *     summary: Delete care plan document
+ *     tags: [Doctor]
+ *     responses:
+ *       200:
+ *         description: Document deleted successfully
+ */
+router.delete("/care-plans/documents/:attachmentId", doctorOnly, deleteCarePlanDocument);
 
 export default router;

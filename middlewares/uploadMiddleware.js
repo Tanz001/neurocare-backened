@@ -26,5 +26,6 @@ const createStorage = (folderName) =>
 const profileUpload = multer({ storage: createStorage("users") });
 export const documentUpload = multer({ storage: createStorage("appointments") });
 export const doctorDocumentUpload = multer({ storage: createStorage("doctor-documents") });
+export const carePlanDocumentUpload = multer({ storage: createStorage("plan-documents") });
 
 export default profileUpload;

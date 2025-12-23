@@ -408,11 +408,14 @@ export const createAppointment = async (req, res) => {
       appointment_for,
       reason,
       notes,
-      payment_method,
+      payment_method: paymentMethodFromBody,
       service_type, // Type de service: neurology, physiotherapy, psychology, nutrition, coaching, group_session
       purchase_id, // Optionnel: ID de l'achat si c'est depuis un plan/package
       use_wallet = true, // Par défaut, utiliser le wallet si disponible
     } = req.body;
+
+    // Utiliser let pour permettre la réassignation
+    let payment_method = paymentMethodFromBody;
 
     if (!doctor_id || !appointment_date || !appointment_time || !appointment_for) {
       await connection.rollback();

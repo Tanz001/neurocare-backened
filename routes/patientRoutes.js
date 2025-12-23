@@ -15,6 +15,10 @@ import {
   getMyPurchases,
   getMyWallet,
 } from "../controllers/productController.js";
+import {
+  getCarePlanById,
+  getPatientCarePlans,
+} from "../controllers/carePlanController.js";
 
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { isPatient } from "../middlewares/roleMiddleware.js";
@@ -291,5 +295,29 @@ router.get("/purchases", patientOnly, getMyPurchases);
  *         description: Wallet fetched successfully
  */
 router.get("/wallet", patientOnly, getMyWallet);
+
+/**
+ * @swagger
+ * /patient/care-plans:
+ *   get:
+ *     summary: Get all care plans for patient
+ *     tags: [Patients]
+ *     responses:
+ *       200:
+ *         description: Care plans fetched successfully
+ */
+router.get("/care-plans", patientOnly, getPatientCarePlans);
+
+/**
+ * @swagger
+ * /patient/care-plans/:carePlanId:
+ *   get:
+ *     summary: Get care plan by ID
+ *     tags: [Patients]
+ *     responses:
+ *       200:
+ *         description: Care plan fetched successfully
+ */
+router.get("/care-plans/:carePlanId", patientOnly, getCarePlanById);
 
 export default router;
