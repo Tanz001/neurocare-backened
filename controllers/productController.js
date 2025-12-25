@@ -15,7 +15,20 @@ export const getPlans = async (req, res) => {
         p.name,
         p.price,
         p.description,
-        p.product_type
+        p.product_type,
+        p.includes_chat_support,
+        p.includes_priority_chat_support,
+        p.includes_private_area,
+        p.includes_free_community_access,
+        p.includes_personal_plan,
+        p.includes_digital_monitoring,
+        p.includes_advanced_digital_monitoring,
+        p.includes_priority_scheduling,
+        p.includes_lifestyle_coaching,
+        p.includes_mindfulness_trial,
+        p.includes_live_activity_trial,
+        p.includes_discount_in_person_visit,
+        p.discount_percent
       FROM products p
       WHERE p.active = 1 AND p.product_type = 'subscription_plan'
       ORDER BY p.price ASC`,
@@ -57,6 +70,20 @@ export const getPlans = async (req, res) => {
           included_services: formattedServices,
           unlocked_services: unlockedServices,
           locked_services: lockedServices,
+          // Additional features
+          includes_chat_support: plan.includes_chat_support === 1 || plan.includes_chat_support === true,
+          includes_priority_chat_support: plan.includes_priority_chat_support === 1 || plan.includes_priority_chat_support === true,
+          includes_private_area: plan.includes_private_area === 1 || plan.includes_private_area === true,
+          includes_free_community_access: plan.includes_free_community_access === 1 || plan.includes_free_community_access === true,
+          includes_personal_plan: plan.includes_personal_plan === 1 || plan.includes_personal_plan === true,
+          includes_digital_monitoring: plan.includes_digital_monitoring === 1 || plan.includes_digital_monitoring === true,
+          includes_advanced_digital_monitoring: plan.includes_advanced_digital_monitoring === 1 || plan.includes_advanced_digital_monitoring === true,
+          includes_priority_scheduling: plan.includes_priority_scheduling === 1 || plan.includes_priority_scheduling === true,
+          includes_lifestyle_coaching: plan.includes_lifestyle_coaching === 1 || plan.includes_lifestyle_coaching === true,
+          includes_mindfulness_trial: plan.includes_mindfulness_trial === 1 || plan.includes_mindfulness_trial === true,
+          includes_live_activity_trial: plan.includes_live_activity_trial === 1 || plan.includes_live_activity_trial === true,
+          includes_discount_in_person_visit: plan.includes_discount_in_person_visit === 1 || plan.includes_discount_in_person_visit === true,
+          discount_percent: plan.discount_percent ? parseFloat(plan.discount_percent) : null,
         };
       })
     );
@@ -232,18 +259,21 @@ export const purchaseProduct = async (req, res) => {
     }
 
     // Récupérer le produit
-    const [product] = await query(
+    const [products] = await connection.execute(
       `SELECT * FROM products WHERE id = ? AND active = 1`,
       [product_id]
     );
 
-    if (!product) {
+    if (!products || products.length === 0) {
       await connection.rollback();
+      connection.release();
       return res.status(404).json({
         success: false,
         message: "Product not found or inactive",
       });
     }
+
+    const product = products[0];
 
     // Calculer les commissions (pour les plans, utiliser 'first' par défaut)
     const commission = await calculateCommission(product_id, 'first', parseFloat(product.price));
@@ -265,25 +295,47 @@ export const purchaseProduct = async (req, res) => {
     const purchaseId = purchaseResult.insertId;
 
     // Récupérer les services du produit
-    const productServices = await query(
+    const [productServices] = await connection.execute(
       `SELECT * FROM product_services WHERE product_id = ?`,
       [product_id]
     );
 
+    console.log(`📦 Product ${product_id} has ${productServices.length} services`);
+
     // Créer les entrées wallet pour chaque service
-    for (const service of productServices) {
-      await connection.execute(
-        `INSERT INTO patient_service_wallet
-          (patient_id, purchase_id, service_type, remaining_sessions, is_locked)
-         VALUES (?, ?, ?, ?, ?)`,
-        [
-          patientId,
-          purchaseId,
-          service.service_type,
-          service.session_count,
-          service.is_locked
-        ]
+    if (productServices && productServices.length > 0) {
+      for (const service of productServices) {
+        // Convertir is_locked de TINYINT(1) à 0/1
+        const serviceIsLocked = service.is_locked === 1 || service.is_locked === true ? 1 : 0;
+        // Neurologie est déverrouillée initialement
+        const isLocked = service.service_type === 'neurology' ? 0 : serviceIsLocked;
+
+        await connection.execute(
+          `INSERT INTO patient_service_wallet
+            (patient_id, purchase_id, service_type, remaining_sessions, is_locked)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            patientId,
+            purchaseId,
+            service.service_type,
+            parseInt(service.session_count) || 0,
+            isLocked,
+          ]
+        );
+        
+        console.log(`✅ Wallet entry created: ${service.service_type}, sessions: ${service.session_count}, locked: ${isLocked}`);
+      }
+    } else {
+      console.warn(`⚠️ No services found for product ${product_id}`);
+    }
+
+    // Si c'est un plan d'abonnement, activer l'abonnement du patient
+    if (product.product_type === 'subscription_plan') {
+      const [updateResult] = await connection.execute(
+        `UPDATE users SET subscribed = 1 WHERE id = ?`,
+        [patientId]
       );
+      console.log(`✅ Updated subscribed status for patient ${patientId}, affected rows: ${updateResult.affectedRows}`);
     }
 
     // Créer une transaction pour l'achat
@@ -343,7 +395,20 @@ export const getMyPurchases = async (req, res) => {
         p.name as product_name,
         p.product_type,
         p.service_category,
-        p.description as product_description
+        p.description as product_description,
+        p.includes_chat_support,
+        p.includes_priority_chat_support,
+        p.includes_private_area,
+        p.includes_free_community_access,
+        p.includes_personal_plan,
+        p.includes_digital_monitoring,
+        p.includes_advanced_digital_monitoring,
+        p.includes_priority_scheduling,
+        p.includes_lifestyle_coaching,
+        p.includes_mindfulness_trial,
+        p.includes_live_activity_trial,
+        p.includes_discount_in_person_visit,
+        p.discount_percent
       FROM patient_purchases pp
       INNER JOIN products p ON pp.product_id = p.id
       WHERE pp.patient_id = ?
@@ -368,7 +433,21 @@ export const getMyPurchases = async (req, res) => {
 
         return {
           ...purchase,
-          wallet: walletEntries
+          wallet: walletEntries,
+          // Additional features from product
+          includes_chat_support: purchase.includes_chat_support === 1 || purchase.includes_chat_support === true,
+          includes_priority_chat_support: purchase.includes_priority_chat_support === 1 || purchase.includes_priority_chat_support === true,
+          includes_private_area: purchase.includes_private_area === 1 || purchase.includes_private_area === true,
+          includes_free_community_access: purchase.includes_free_community_access === 1 || purchase.includes_free_community_access === true,
+          includes_personal_plan: purchase.includes_personal_plan === 1 || purchase.includes_personal_plan === true,
+          includes_digital_monitoring: purchase.includes_digital_monitoring === 1 || purchase.includes_digital_monitoring === true,
+          includes_advanced_digital_monitoring: purchase.includes_advanced_digital_monitoring === 1 || purchase.includes_advanced_digital_monitoring === true,
+          includes_priority_scheduling: purchase.includes_priority_scheduling === 1 || purchase.includes_priority_scheduling === true,
+          includes_lifestyle_coaching: purchase.includes_lifestyle_coaching === 1 || purchase.includes_lifestyle_coaching === true,
+          includes_mindfulness_trial: purchase.includes_mindfulness_trial === 1 || purchase.includes_mindfulness_trial === true,
+          includes_live_activity_trial: purchase.includes_live_activity_trial === 1 || purchase.includes_live_activity_trial === true,
+          includes_discount_in_person_visit: purchase.includes_discount_in_person_visit === 1 || purchase.includes_discount_in_person_visit === true,
+          discount_percent: purchase.discount_percent ? parseFloat(purchase.discount_percent) : null,
         };
       })
     );

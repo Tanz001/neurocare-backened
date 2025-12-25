@@ -18,7 +18,20 @@ export const getAllPlansAdmin = async (req, res) => {
   requires_initial_neuro,
   description,
   active,
-  created_at
+  created_at,
+  includes_chat_support,
+  includes_priority_chat_support,
+  includes_private_area,
+  includes_free_community_access,
+  includes_personal_plan,
+  includes_digital_monitoring,
+  includes_advanced_digital_monitoring,
+  includes_priority_scheduling,
+  includes_lifestyle_coaching,
+  includes_mindfulness_trial,
+  includes_live_activity_trial,
+  includes_discount_in_person_visit,
+  discount_percent
 FROM products
 WHERE active = 1
 ORDER BY product_type, price ASC;
@@ -44,6 +57,19 @@ ORDER BY product_type, price ASC;
 
         return {
           ...plan,
+          includes_chat_support: plan.includes_chat_support === 1 || plan.includes_chat_support === true,
+          includes_priority_chat_support: plan.includes_priority_chat_support === 1 || plan.includes_priority_chat_support === true,
+          includes_private_area: plan.includes_private_area === 1 || plan.includes_private_area === true,
+          includes_free_community_access: plan.includes_free_community_access === 1 || plan.includes_free_community_access === true,
+          includes_personal_plan: plan.includes_personal_plan === 1 || plan.includes_personal_plan === true,
+          includes_digital_monitoring: plan.includes_digital_monitoring === 1 || plan.includes_digital_monitoring === true,
+          includes_advanced_digital_monitoring: plan.includes_advanced_digital_monitoring === 1 || plan.includes_advanced_digital_monitoring === true,
+          includes_priority_scheduling: plan.includes_priority_scheduling === 1 || plan.includes_priority_scheduling === true,
+          includes_lifestyle_coaching: plan.includes_lifestyle_coaching === 1 || plan.includes_lifestyle_coaching === true,
+          includes_mindfulness_trial: plan.includes_mindfulness_trial === 1 || plan.includes_mindfulness_trial === true,
+          includes_live_activity_trial: plan.includes_live_activity_trial === 1 || plan.includes_live_activity_trial === true,
+          includes_discount_in_person_visit: plan.includes_discount_in_person_visit === 1 || plan.includes_discount_in_person_visit === true,
+          discount_percent: plan.discount_percent ? parseFloat(plan.discount_percent) : null,
           services: services.map(s => ({
             id: s.id,
             service_type: s.service_type,
@@ -83,7 +109,14 @@ export const getPlanByIdAdmin = async (req, res) => {
     }
 
     const [plan] = await query(
-      `SELECT * FROM products WHERE id = ? AND product_type = 'subscription_plan'`,
+      `SELECT 
+        id, name, product_type, service_category, price, platform_commission_percent,
+        followup_commission_percent, requires_initial_neuro, description, active, created_at,
+        includes_chat_support, includes_priority_chat_support, includes_private_area,
+        includes_free_community_access, includes_personal_plan, includes_digital_monitoring,
+        includes_advanced_digital_monitoring, includes_priority_scheduling, includes_lifestyle_coaching,
+        includes_mindfulness_trial, includes_live_activity_trial, includes_discount_in_person_visit, discount_percent
+      FROM products WHERE id = ? AND product_type = 'subscription_plan'`,
       [planId]
     );
 
@@ -111,6 +144,19 @@ export const getPlanByIdAdmin = async (req, res) => {
       success: true,
       plan: {
         ...plan,
+        includes_chat_support: plan.includes_chat_support === 1 || plan.includes_chat_support === true,
+        includes_priority_chat_support: plan.includes_priority_chat_support === 1 || plan.includes_priority_chat_support === true,
+        includes_private_area: plan.includes_private_area === 1 || plan.includes_private_area === true,
+        includes_free_community_access: plan.includes_free_community_access === 1 || plan.includes_free_community_access === true,
+        includes_personal_plan: plan.includes_personal_plan === 1 || plan.includes_personal_plan === true,
+        includes_digital_monitoring: plan.includes_digital_monitoring === 1 || plan.includes_digital_monitoring === true,
+        includes_advanced_digital_monitoring: plan.includes_advanced_digital_monitoring === 1 || plan.includes_advanced_digital_monitoring === true,
+        includes_priority_scheduling: plan.includes_priority_scheduling === 1 || plan.includes_priority_scheduling === true,
+        includes_lifestyle_coaching: plan.includes_lifestyle_coaching === 1 || plan.includes_lifestyle_coaching === true,
+        includes_mindfulness_trial: plan.includes_mindfulness_trial === 1 || plan.includes_mindfulness_trial === true,
+        includes_live_activity_trial: plan.includes_live_activity_trial === 1 || plan.includes_live_activity_trial === true,
+        includes_discount_in_person_visit: plan.includes_discount_in_person_visit === 1 || plan.includes_discount_in_person_visit === true,
+        discount_percent: plan.discount_percent ? parseFloat(plan.discount_percent) : null,
         services: services.map(s => ({
           id: s.id,
           service_type: s.service_type,
@@ -147,6 +193,20 @@ export const createPlan = async (req, res) => {
       followup_commission_percent,
       requires_initial_neuro,
       services, // Array of { service_type, session_count, is_locked, unlock_after_service }
+      // Additional features
+      includes_chat_support,
+      includes_priority_chat_support,
+      includes_private_area,
+      includes_free_community_access,
+      includes_personal_plan,
+      includes_digital_monitoring,
+      includes_advanced_digital_monitoring,
+      includes_priority_scheduling,
+      includes_lifestyle_coaching,
+      includes_mindfulness_trial,
+      includes_live_activity_trial,
+      includes_discount_in_person_visit,
+      discount_percent,
     } = req.body;
 
     // Validation
@@ -161,8 +221,11 @@ export const createPlan = async (req, res) => {
     // Créer le plan
     const [result] = await connection.execute(
       `INSERT INTO products
-       (name, product_type, service_category, price, platform_commission_percent, followup_commission_percent, requires_initial_neuro, description, active)
-       VALUES (?, 'subscription_plan', ?, ?, ?, ?, ?, ?, 1)`,
+       (name, product_type, service_category, price, platform_commission_percent, followup_commission_percent, requires_initial_neuro, description, active,
+        includes_chat_support, includes_priority_chat_support, includes_private_area, includes_free_community_access,
+        includes_personal_plan, includes_digital_monitoring, includes_advanced_digital_monitoring, includes_priority_scheduling,
+        includes_lifestyle_coaching, includes_mindfulness_trial, includes_live_activity_trial, includes_discount_in_person_visit, discount_percent)
+       VALUES (?, 'subscription_plan', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         service_category || 'multidisciplinary',
@@ -171,6 +234,20 @@ export const createPlan = async (req, res) => {
         followup_commission_percent ? parseFloat(followup_commission_percent) : null,
         requires_initial_neuro ? 1 : 0,
         description || null,
+        // Additional features
+        includes_chat_support ? 1 : 0,
+        includes_priority_chat_support ? 1 : 0,
+        includes_private_area ? 1 : 0,
+        includes_free_community_access ? 1 : 0,
+        includes_personal_plan ? 1 : 0,
+        includes_digital_monitoring ? 1 : 0,
+        includes_advanced_digital_monitoring ? 1 : 0,
+        includes_priority_scheduling ? 1 : 0,
+        includes_lifestyle_coaching ? 1 : 0,
+        includes_mindfulness_trial ? 1 : 0,
+        includes_live_activity_trial ? 1 : 0,
+        includes_discount_in_person_visit ? 1 : 0,
+        discount_percent ? parseFloat(discount_percent) : null,
       ]
     );
 
@@ -205,7 +282,14 @@ export const createPlan = async (req, res) => {
 
     // Récupérer le plan créé avec ses services
     const [createdPlan] = await query(
-      `SELECT * FROM products WHERE id = ?`,
+      `SELECT 
+        id, name, product_type, service_category, price, platform_commission_percent,
+        followup_commission_percent, requires_initial_neuro, description, active, created_at,
+        includes_chat_support, includes_priority_chat_support, includes_private_area,
+        includes_free_community_access, includes_personal_plan, includes_digital_monitoring,
+        includes_advanced_digital_monitoring, includes_priority_scheduling, includes_lifestyle_coaching,
+        includes_mindfulness_trial, includes_live_activity_trial, includes_discount_in_person_visit, discount_percent
+      FROM products WHERE id = ?`,
       [planId]
     );
 
@@ -219,6 +303,19 @@ export const createPlan = async (req, res) => {
       message: "Plan created successfully",
       plan: {
         ...createdPlan,
+        includes_chat_support: createdPlan.includes_chat_support === 1 || createdPlan.includes_chat_support === true,
+        includes_priority_chat_support: createdPlan.includes_priority_chat_support === 1 || createdPlan.includes_priority_chat_support === true,
+        includes_private_area: createdPlan.includes_private_area === 1 || createdPlan.includes_private_area === true,
+        includes_free_community_access: createdPlan.includes_free_community_access === 1 || createdPlan.includes_free_community_access === true,
+        includes_personal_plan: createdPlan.includes_personal_plan === 1 || createdPlan.includes_personal_plan === true,
+        includes_digital_monitoring: createdPlan.includes_digital_monitoring === 1 || createdPlan.includes_digital_monitoring === true,
+        includes_advanced_digital_monitoring: createdPlan.includes_advanced_digital_monitoring === 1 || createdPlan.includes_advanced_digital_monitoring === true,
+        includes_priority_scheduling: createdPlan.includes_priority_scheduling === 1 || createdPlan.includes_priority_scheduling === true,
+        includes_lifestyle_coaching: createdPlan.includes_lifestyle_coaching === 1 || createdPlan.includes_lifestyle_coaching === true,
+        includes_mindfulness_trial: createdPlan.includes_mindfulness_trial === 1 || createdPlan.includes_mindfulness_trial === true,
+        includes_live_activity_trial: createdPlan.includes_live_activity_trial === 1 || createdPlan.includes_live_activity_trial === true,
+        includes_discount_in_person_visit: createdPlan.includes_discount_in_person_visit === 1 || createdPlan.includes_discount_in_person_visit === true,
+        discount_percent: createdPlan.discount_percent ? parseFloat(createdPlan.discount_percent) : null,
         services: createdServices.map(s => ({
           id: s.id,
           service_type: s.service_type,
@@ -260,6 +357,20 @@ export const updatePlan = async (req, res) => {
       requires_initial_neuro,
       active,
       services, // Array of { id?, service_type, session_count, is_locked, unlock_after_service }
+      // Additional features
+      includes_chat_support,
+      includes_priority_chat_support,
+      includes_private_area,
+      includes_free_community_access,
+      includes_personal_plan,
+      includes_digital_monitoring,
+      includes_advanced_digital_monitoring,
+      includes_priority_scheduling,
+      includes_lifestyle_coaching,
+      includes_mindfulness_trial,
+      includes_live_activity_trial,
+      includes_discount_in_person_visit,
+      discount_percent,
     } = req.body;
 
     if (isNaN(planId)) {
@@ -322,6 +433,59 @@ export const updatePlan = async (req, res) => {
       updateFields.push('active = ?');
       updateValues.push(active ? 1 : 0);
     }
+    // Additional features
+    if (includes_chat_support !== undefined) {
+      updateFields.push('includes_chat_support = ?');
+      updateValues.push(includes_chat_support ? 1 : 0);
+    }
+    if (includes_priority_chat_support !== undefined) {
+      updateFields.push('includes_priority_chat_support = ?');
+      updateValues.push(includes_priority_chat_support ? 1 : 0);
+    }
+    if (includes_private_area !== undefined) {
+      updateFields.push('includes_private_area = ?');
+      updateValues.push(includes_private_area ? 1 : 0);
+    }
+    if (includes_free_community_access !== undefined) {
+      updateFields.push('includes_free_community_access = ?');
+      updateValues.push(includes_free_community_access ? 1 : 0);
+    }
+    if (includes_personal_plan !== undefined) {
+      updateFields.push('includes_personal_plan = ?');
+      updateValues.push(includes_personal_plan ? 1 : 0);
+    }
+    if (includes_digital_monitoring !== undefined) {
+      updateFields.push('includes_digital_monitoring = ?');
+      updateValues.push(includes_digital_monitoring ? 1 : 0);
+    }
+    if (includes_advanced_digital_monitoring !== undefined) {
+      updateFields.push('includes_advanced_digital_monitoring = ?');
+      updateValues.push(includes_advanced_digital_monitoring ? 1 : 0);
+    }
+    if (includes_priority_scheduling !== undefined) {
+      updateFields.push('includes_priority_scheduling = ?');
+      updateValues.push(includes_priority_scheduling ? 1 : 0);
+    }
+    if (includes_lifestyle_coaching !== undefined) {
+      updateFields.push('includes_lifestyle_coaching = ?');
+      updateValues.push(includes_lifestyle_coaching ? 1 : 0);
+    }
+    if (includes_mindfulness_trial !== undefined) {
+      updateFields.push('includes_mindfulness_trial = ?');
+      updateValues.push(includes_mindfulness_trial ? 1 : 0);
+    }
+    if (includes_live_activity_trial !== undefined) {
+      updateFields.push('includes_live_activity_trial = ?');
+      updateValues.push(includes_live_activity_trial ? 1 : 0);
+    }
+    if (includes_discount_in_person_visit !== undefined) {
+      updateFields.push('includes_discount_in_person_visit = ?');
+      updateValues.push(includes_discount_in_person_visit ? 1 : 0);
+    }
+    if (discount_percent !== undefined) {
+      updateFields.push('discount_percent = ?');
+      updateValues.push(discount_percent ? parseFloat(discount_percent) : null);
+    }
 
     if (updateFields.length > 0) {
       updateValues.push(planId);
@@ -370,7 +534,14 @@ export const updatePlan = async (req, res) => {
 
     // Récupérer le plan mis à jour
     const [updatedPlan] = await query(
-      `SELECT * FROM products WHERE id = ?`,
+      `SELECT 
+        id, name, product_type, service_category, price, platform_commission_percent,
+        followup_commission_percent, requires_initial_neuro, description, active, created_at, 
+        includes_chat_support, includes_priority_chat_support, includes_private_area,
+        includes_free_community_access, includes_personal_plan, includes_digital_monitoring,
+        includes_advanced_digital_monitoring, includes_priority_scheduling, includes_lifestyle_coaching,
+        includes_mindfulness_trial, includes_live_activity_trial, includes_discount_in_person_visit, discount_percent
+      FROM products WHERE id = ?`,
       [planId]
     );
 
@@ -384,6 +555,19 @@ export const updatePlan = async (req, res) => {
       message: "Plan updated successfully",
       plan: {
         ...updatedPlan,
+        includes_chat_support: updatedPlan.includes_chat_support === 1 || updatedPlan.includes_chat_support === true,
+        includes_priority_chat_support: updatedPlan.includes_priority_chat_support === 1 || updatedPlan.includes_priority_chat_support === true,
+        includes_private_area: updatedPlan.includes_private_area === 1 || updatedPlan.includes_private_area === true,
+        includes_free_community_access: updatedPlan.includes_free_community_access === 1 || updatedPlan.includes_free_community_access === true,
+        includes_personal_plan: updatedPlan.includes_personal_plan === 1 || updatedPlan.includes_personal_plan === true,
+        includes_digital_monitoring: updatedPlan.includes_digital_monitoring === 1 || updatedPlan.includes_digital_monitoring === true,
+        includes_advanced_digital_monitoring: updatedPlan.includes_advanced_digital_monitoring === 1 || updatedPlan.includes_advanced_digital_monitoring === true,
+        includes_priority_scheduling: updatedPlan.includes_priority_scheduling === 1 || updatedPlan.includes_priority_scheduling === true,
+        includes_lifestyle_coaching: updatedPlan.includes_lifestyle_coaching === 1 || updatedPlan.includes_lifestyle_coaching === true,
+        includes_mindfulness_trial: updatedPlan.includes_mindfulness_trial === 1 || updatedPlan.includes_mindfulness_trial === true,
+        includes_live_activity_trial: updatedPlan.includes_live_activity_trial === 1 || updatedPlan.includes_live_activity_trial === true,
+        includes_discount_in_person_visit: updatedPlan.includes_discount_in_person_visit === 1 || updatedPlan.includes_discount_in_person_visit === true,
+        discount_percent: updatedPlan.discount_percent ? parseFloat(updatedPlan.discount_percent) : null,
         services: updatedServices.map(s => ({
           id: s.id,
           service_type: s.service_type,

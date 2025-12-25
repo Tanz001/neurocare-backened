@@ -259,20 +259,82 @@ export const getTransactions = async (req, res) => {
 
     const transactions = await query(
       `SELECT 
-        t.*,
+        t.id,
+        t.transaction_type,
+        t.amount,
+        t.status,
+        t.payment_method,
+        t.created_at,
+        t.platform_fee,
+        t.professional_earning,
+        t.product_id,
+        t.purchase_id,
+        t.appointment_id,
+        d.id AS doctor_id,
         d.full_name AS doctor_name,
-        p.full_name AS patient_name
+        d.speciality AS doctor_speciality,
+        p.id AS patient_id,
+        p.full_name AS patient_name,
+        a.appointment_date,
+        a.appointment_time,
+        a.appointment_for,
+        a.service_type,
+        a.visit_type,
+        pr.name AS product_name,
+        pr.product_type,
+        pr.platform_commission_percent,
+        pr.followup_commission_percent,
+        CASE 
+          WHEN a.visit_type = 'followup' AND pr.followup_commission_percent IS NOT NULL 
+          THEN pr.followup_commission_percent
+          ELSE pr.platform_commission_percent
+        END AS applied_commission_percent,
+        CASE 
+          WHEN t.platform_fee IS NOT NULL AND t.amount > 0
+          THEN ROUND((t.platform_fee / t.amount) * 100, 2)
+          WHEN pr.platform_commission_percent IS NOT NULL
+          THEN pr.platform_commission_percent
+          ELSE NULL
+        END AS calculated_commission_rate
        FROM transactions t
-       INNER JOIN users d ON d.id = t.doctor_id
-       INNER JOIN users p ON p.id = t.patient_id
+       LEFT JOIN users d ON d.id = t.doctor_id
+       LEFT JOIN users p ON p.id = t.patient_id
+       LEFT JOIN appointments a ON a.id = t.appointment_id
+       LEFT JOIN products pr ON pr.id = t.product_id
        ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
        ORDER BY t.created_at DESC`,
+      params
+    );
+
+    // Calculate summary with commission details
+    const [summaryData] = await query(
+      `SELECT 
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) AS total_paid,
+        SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) AS paid_count,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN status='paid' THEN platform_fee ELSE 0 END) AS total_platform_fee,
+        SUM(CASE WHEN status='paid' THEN professional_earning ELSE 0 END) AS total_professional_earning,
+        SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) AS total_amount
+       FROM transactions t
+       ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}`,
       params
     );
 
     return res.status(200).json({
       success: true,
       transactions,
+      summary: summaryData || {
+        total_count: 0,
+        total_paid: 0,
+        paid_count: 0,
+        pending_count: 0,
+        failed_count: 0,
+        total_platform_fee: 0,
+        total_professional_earning: 0,
+        total_amount: 0,
+      },
     });
   } catch (error) {
     console.error("getTransactions error:", error);

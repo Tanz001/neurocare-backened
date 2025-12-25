@@ -5,6 +5,8 @@ import {
   createPlanPaymentIntent,
   createPlanPaymentIntentNoAuth,
   confirmPlanPayment,
+  createAppointmentPaymentIntent,
+  confirmAppointmentPayment,
   stripeWebhook,
 } from "../controllers/paymentController.js";
 
@@ -84,6 +86,12 @@ router.post("/create-plan-intent-noauth", createPlanPaymentIntentNoAuth);
 
 // Confirm plan payment and store data (no auth required - uses metadata from payment intent)
 router.post("/confirm-plan", confirmPlanPayment);
+
+// Appointment payment - Payment Intent (authenticated)
+router.post("/create-appointment-intent", authMiddleware, createAppointmentPaymentIntent);
+
+// Confirm appointment payment and create appointment (no auth required - uses metadata from payment intent)
+router.post("/confirm-appointment", confirmAppointmentPayment);
 
 /**
  * @swagger

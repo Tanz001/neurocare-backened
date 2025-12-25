@@ -465,14 +465,14 @@ export const createAppointment = async (req, res) => {
     );
     const hasActivePlan = activePlan && activePlan.length > 0 && activePlan[0].count > 0;
 
-    // Si le patient a un plan actif, il DOIT utiliser le wallet (pas d'appointments payants séparés)
-    // Vérifier si le service peut être réservé depuis le wallet
+    // Si le patient a un plan actif, vérifier si le service peut être réservé depuis le wallet
+    // Si oui, utiliser le wallet (gratuit). Si non, permettre la réservation avec paiement
     if (hasActivePlan && determinedServiceType !== 'group_session') {
       // Patient avec plan actif - vérifier si le service est disponible dans le plan
       const walletCheck = await canBookService(patientId, determinedServiceType);
       
       if (walletCheck.canBook && walletCheck.walletEntry) {
-        // Réserver depuis le wallet
+        // Réserver depuis le wallet (gratuit - première consultation du plan)
         consumedFromPlan = true;
         walletPurchaseId = walletCheck.walletEntry.purchase_id;
         
@@ -493,14 +493,20 @@ export const createAppointment = async (req, res) => {
         appointmentFee = 0;
         payment_method = 'none';
       } else {
-        // Le service n'est pas disponible dans le wallet OU est verrouillé
-        // Si le patient a un plan actif, il ne peut PAS réserver ce service comme appointment payant
-        await connection.rollback();
-        const reason = walletCheck.reason || "This service is not available in your current plan or is locked. Please complete required consultations first to unlock this service.";
-        return res.status(403).json({
-          success: false,
-          message: reason,
-        });
+        // Le service n'est pas disponible dans le wallet (plus de sessions OU verrouillé)
+        // Si verrouillé, bloquer. Si juste plus de sessions, permettre le paiement
+        if (walletCheck.reason && walletCheck.reason.includes('locked')) {
+          // Service verrouillé - bloquer la réservation
+          await connection.rollback();
+          const reason = walletCheck.reason || "This service is locked. Please complete required consultations first to unlock this service.";
+          return res.status(403).json({
+            success: false,
+            message: reason,
+          });
+        }
+        // Sinon, c'est juste qu'il n'y a plus de sessions - permettre la réservation avec paiement
+        // On continue dans le flux normal pour créer un appointment payant
+        console.log(`ℹ️ Patient has active plan but no remaining wallet sessions for ${determinedServiceType}. Allowing paid appointment.`);
       }
     } else if (use_wallet && determinedServiceType !== 'group_session' && !hasActivePlan) {
       // Patient SANS plan actif mais use_wallet = true - vérifier le wallet quand même
@@ -529,8 +535,8 @@ export const createAppointment = async (req, res) => {
 
     // Si pas de wallet ou pas disponible, c'est un rendez-vous payant
     if (!consumedFromPlan) {
-      // Déterminer si c'est une première visite ou un suivi
-      visitType = (await isFirstVisit(patientId, doctor_id, determinedServiceType)) ? 'first' : 'followup';
+      // When payment is required (no wallet), it's always a follow-up appointment
+      visitType = 'followup';
       
       // Pour les sessions de groupe, payment_method est requis
       if (determinedServiceType === 'group_session') {
@@ -544,26 +550,25 @@ export const createAppointment = async (req, res) => {
         // Le prix des sessions de groupe sera géré séparément (€39-€59)
         appointmentFee = doctor.fee || 39; // Par défaut
       } else {
-        // Récupérer le prix du service individuel
-        const servicePrice = await getSingleServicePrice(determinedServiceType, visitType === 'first');
-        
-        if (servicePrice === null) {
+        // Use doctor's fee for paid appointments
+        if (!doctor.fee || doctor.fee <= 0) {
           await connection.rollback();
           return res.status(400).json({
             success: false,
-            message: `Service type '${determinedServiceType}' is not available as a single service`,
+            message: "Doctor fee is not set. Please contact support.",
           });
         }
 
-        appointmentFee = servicePrice;
+        appointmentFee = parseFloat(doctor.fee);
 
-        // if (!payment_method) {
-        //   await connection.rollback();
-        //   return res.status(400).json({
-        //     success: false,
-        //     message: "payment_method is required",
-        //   });
-        // }
+        // Si c'est un appointment payant (pas depuis le wallet), payment_method est requis
+        if (!payment_method) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: "payment_method is required for paid appointments. Please select a payment method.",
+          });
+        }
       }
     }
 
@@ -723,6 +728,49 @@ export const createAppointment = async (req, res) => {
         console.error("Error creating transaction for plan appointment:", txError);
         // Ne pas faire échouer la création de l'appointment si la transaction échoue
         // L'appointment est créé, c'est juste l'enregistrement de transaction qui échoue
+      }
+    } else if (!consumedFromPlan && appointmentFee > 0) {
+      // Create transaction for paid appointments (not from plan)
+      try {
+        // Calculate commission for paid appointments
+        // Use default commission rate (20%) if no product
+        let commission = { platformFee: 0, professionalEarning: 0 };
+        try {
+          // Try to get commission from a default product or use system default
+          // For now, use default 20% platform commission
+          const defaultCommissionRate = 0.20; // 20%
+          commission = {
+            platformFee: appointmentFee * defaultCommissionRate,
+            professionalEarning: appointmentFee * (1 - defaultCommissionRate),
+          };
+        } catch (error) {
+          // Fallback to default commission
+          const defaultCommissionRate = 0.20;
+          commission = {
+            platformFee: appointmentFee * defaultCommissionRate,
+            professionalEarning: appointmentFee * (1 - defaultCommissionRate),
+          };
+        }
+
+        // Create transaction for paid appointment
+        await connection.execute(
+          `INSERT INTO transactions
+           (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+            platform_fee, professional_earning)
+           VALUES ('appointment_payment', ?, ?, ?, ?, ?, 'paid', ?, ?)`,
+          [
+            appointmentId,
+            patientId,
+            doctor_id,
+            appointmentFee,
+            payment_method || 'card',
+            commission.platformFee || 0,
+            commission.professionalEarning || 0,
+          ]
+        );
+      } catch (txError) {
+        console.error("Error creating transaction for paid appointment:", txError);
+        // Don't fail appointment creation if transaction fails
       }
     }
 
