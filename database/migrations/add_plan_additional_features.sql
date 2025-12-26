@@ -20,3 +20,4 @@ ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) NULL DEFAULT NULL;
 -- For older versions, you may need to remove IF NOT EXISTS or handle errors manually
 
 
+

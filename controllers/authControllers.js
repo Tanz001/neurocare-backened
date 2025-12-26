@@ -27,6 +27,7 @@ const publicUserFields = [
   "fee",
   "profile_image_url",
   "bio",
+  "balance",
   "created_at",
   "updated_at",
 ];

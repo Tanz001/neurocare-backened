@@ -56,6 +56,8 @@ export const getTransactions = async (req, res) => {
         t.status,
         t.created_at,
         t.payment_method,
+        t.platform_fee,
+        t.professional_earning,
 
         -- PLAN / PRODUCT
         pr.name AS product_name,
@@ -67,6 +69,7 @@ export const getTransactions = async (req, res) => {
         d.id AS doctor_id,
         d.full_name AS doctor_name,
         d.speciality,
+        d.balance AS doctor_balance,
 
         -- APPOINTMENT (optional)
         a.appointment_date,

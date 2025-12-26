@@ -393,6 +393,15 @@ export const confirmAppointmentPayment = async (req, res) => {
       ]
     );
 
+    // Update doctor's balance (80% of appointment fee for paid appointments)
+    if (commission.professionalEarning > 0) {
+      await connection.execute(
+        `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+        [commission.professionalEarning, doctorId]
+      );
+      console.log(`✅ Updated doctor ${doctorId} balance: +${commission.professionalEarning}`);
+    }
+
     await connection.commit();
     connection.release();
 
@@ -578,10 +587,11 @@ export const confirmPlanPayment = async (req, res) => {
     // Créer les entrées wallet pour chaque service
     if (productServices && productServices.length > 0) {
       for (const service of productServices) {
-        // Neurologie est déverrouillée initialement, autres services sont verrouillés selon is_locked
+        // Neurologie est toujours déverrouillée initialement, tous les autres services sont verrouillés
+        // jusqu'à ce que la consultation neurologique soit complétée
         // Convertir is_locked de TINYINT(1) à 0/1
         const serviceIsLocked = service.is_locked === 1 || service.is_locked === true ? 1 : 0;
-        const isLocked = service.service_type === 'neurology' ? 0 : serviceIsLocked;
+        const isLocked = service.service_type === 'neurology' ? 0 : (serviceIsLocked || 1);
 
         await connection.execute(
           `INSERT INTO patient_service_wallet
@@ -738,8 +748,10 @@ export const stripeWebhook = async (req, res) => {
 
       // Créer les entrées wallet pour chaque service
       for (const service of productServices) {
-        // Neurologie est déverrouillée initialement, autres services sont verrouillés selon is_locked
-        const isLocked = service.service_type === 'neurology' ? 0 : service.is_locked;
+        // Neurologie est toujours déverrouillée initialement, tous les autres services sont verrouillés
+        // jusqu'à ce que la consultation neurologique soit complétée
+        const serviceIsLocked = service.is_locked === 1 || service.is_locked === true ? 1 : 0;
+        const isLocked = service.service_type === 'neurology' ? 0 : (serviceIsLocked || 1);
 
         await connection.execute(
           `INSERT INTO patient_service_wallet

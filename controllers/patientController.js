@@ -723,6 +723,15 @@ export const createAppointment = async (req, res) => {
               commission.professionalEarning || 0,
             ]
           );
+
+          // Update doctor's balance (professional earning from plan)
+          if (commission.professionalEarning > 0) {
+            await connection.execute(
+              `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+              [commission.professionalEarning, doctor_id]
+            );
+            console.log(`✅ Updated doctor ${doctor_id} balance from plan: +${commission.professionalEarning}`);
+          }
         }
       } catch (txError) {
         console.error("Error creating transaction for plan appointment:", txError);
@@ -768,6 +777,15 @@ export const createAppointment = async (req, res) => {
             commission.professionalEarning || 0,
           ]
         );
+
+        // Update doctor's balance (80% of appointment fee for paid appointments)
+        if (commission.professionalEarning > 0) {
+          await connection.execute(
+            `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+            [commission.professionalEarning, doctor_id]
+          );
+          console.log(`✅ Updated doctor ${doctor_id} balance from paid appointment: +${commission.professionalEarning}`);
+        }
       } catch (txError) {
         console.error("Error creating transaction for paid appointment:", txError);
         // Don't fail appointment creation if transaction fails
