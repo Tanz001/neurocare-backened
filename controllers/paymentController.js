@@ -184,7 +184,8 @@ export const createAppointmentPaymentIntent = async (req, res) => {
       determinedServiceType = specialityMap[doctor.speciality?.toLowerCase()] || 'neurology';
     }
 
-    // Check if patient has wallet sessions for this service
+    // Simple check: if wallet has remaining sessions, no payment needed
+    // If no sessions, require payment
     const { canBookService } = await import('../services/productService.js');
     const walletCheck = await canBookService(patientId, determinedServiceType);
 
@@ -196,6 +197,8 @@ export const createAppointmentPaymentIntent = async (req, res) => {
         message: 'Appointment can be booked using your plan',
       });
     }
+
+    // No wallet sessions - payment required
 
     // If payment is required (no wallet sessions), use doctor's fee and mark as followup
     // If wallet has sessions, it's free and visit type is determined by isFirstVisit
@@ -585,13 +588,15 @@ export const confirmPlanPayment = async (req, res) => {
     console.log(`📦 Product ${productId} has ${productServices.length} services`);
 
     // Créer les entrées wallet pour chaque service
+    // All services in the plan should be unlocked initially (not just neurology)
     if (productServices && productServices.length > 0) {
+      // Get list of service types in this plan
+      const planServiceTypes = productServices.map(s => s.service_type);
+      
       for (const service of productServices) {
-        // Neurologie est toujours déverrouillée initialement, tous les autres services sont verrouillés
-        // jusqu'à ce que la consultation neurologique soit complétée
-        // Convertir is_locked de TINYINT(1) à 0/1
-        const serviceIsLocked = service.is_locked === 1 || service.is_locked === true ? 1 : 0;
-        const isLocked = service.service_type === 'neurology' ? 0 : (serviceIsLocked || 1);
+        // All services in the plan are unlocked initially
+        // Services not in the plan will be locked (they won't have wallet entries)
+        const isLocked = 0; // All services in plan are unlocked
 
         await connection.execute(
           `INSERT INTO patient_service_wallet

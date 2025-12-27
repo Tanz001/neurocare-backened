@@ -1,6 +1,7 @@
 import path from "path";
 import { query } from "../config/db.js";
-import { unlockServicesAfterNeurology } from "../services/productService.js";
+import { unlockServicesAfterNeurology, calculateCommission } from "../services/productService.js";
+import pool from "../config/db.js";
 
 const dayFields = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const allowedAppointmentStatuses = ["pending", "accepted", "rejected", "completed", "cancelled"];
@@ -802,23 +803,161 @@ export const updateAppointment = async (req, res) => {
       });
     }
 
-    // Si le rendez-vous est marqué comme complété et c'est une consultation neurologique,
-    // déverrouiller les services liés
+    // Si le rendez-vous est marqué comme complété
     if (status === 'completed') {
-      const [appointment] = await query(
-        `SELECT patient_id, service_type, purchase_id 
-         FROM appointments 
-         WHERE id = ?`,
-        [appointmentId]
-      );
+      const connection = await pool.getConnection();
+      
+      try {
+        await connection.beginTransaction();
+        
+        // Get appointment details with doctor speciality
+        const [appointmentRows] = await connection.execute(
+          `SELECT 
+            a.patient_id, 
+            a.doctor_id, 
+            a.service_type, 
+            a.purchase_id, 
+            a.product_id,
+            a.consumed_from_plan,
+            a.fee,
+            a.visit_type,
+            u.speciality as doctor_speciality
+           FROM appointments a
+           INNER JOIN users u ON a.doctor_id = u.id
+           WHERE a.id = ?`,
+          [appointmentId]
+        );
 
-      if (appointment && appointment.service_type === 'neurology' && appointment.purchase_id) {
-        try {
-          await unlockServicesAfterNeurology(appointment.patient_id, appointment.purchase_id);
-        } catch (unlockError) {
-          console.error("Error unlocking services after neurology completion:", unlockError);
-          // Ne pas faire échouer la requête si le déverrouillage échoue
+        if (appointmentRows && appointmentRows.length > 0) {
+          const appointment = appointmentRows[0];
+          
+          // Check if this is a neurology appointment (by service_type OR doctor speciality)
+          const isNeurologyAppointment = 
+            appointment.service_type === 'neurology' || 
+            appointment.doctor_speciality?.toLowerCase() === 'neurologist';
+          
+          console.log(`🔍 Appointment ${appointmentId} completion check: service_type=${appointment.service_type}, doctor_speciality=${appointment.doctor_speciality}, isNeurology=${isNeurologyAppointment}`);
+          
+          // 1. Unlock services if neurology appointment is completed
+          if (isNeurologyAppointment) {
+            try {
+              if (appointment.purchase_id) {
+                // Unlock services in wallet that require neurology completion
+                await unlockServicesAfterNeurology(appointment.patient_id, appointment.purchase_id);
+                console.log(`✅ Services unlocked after neurology appointment ${appointmentId} (via unlockServicesAfterNeurology)`);
+              }
+              
+              // Also unlock all other services in wallet for this patient (regardless of purchase_id)
+              // This ensures all services unlock after neurology completion
+              const [unlockAllResult] = await connection.execute(
+                `UPDATE patient_service_wallet psw
+                 SET psw.is_locked = 0
+                 WHERE psw.patient_id = ?
+                   AND psw.service_type != 'neurology'
+                   AND psw.is_locked = 1`,
+                [appointment.patient_id]
+              );
+              
+              if (unlockAllResult.affectedRows > 0) {
+                console.log(`✅ Unlocked ${unlockAllResult.affectedRows} additional services after neurology appointment ${appointmentId}`);
+              } else {
+                console.log(`ℹ️ No services found to unlock for patient ${appointment.patient_id} (may already be unlocked)`);
+              }
+            } catch (unlockError) {
+              console.error("❌ Error unlocking services after neurology completion:", unlockError);
+              // Don't fail if unlock fails
+            }
+          } else {
+            console.log(`ℹ️ Appointment ${appointmentId} is not a neurology appointment, skipping unlock`);
+          }
+
+          // 2. Create transaction and update doctor balance
+          // Check if transaction already exists for this appointment
+          const [existingTx] = await connection.execute(
+            `SELECT id FROM transactions WHERE appointment_id = ?`,
+            [appointmentId]
+          );
+
+          if (!existingTx || existingTx.length === 0) {
+            let commission = { platformFee: 0, professionalEarning: 0 };
+            const appointmentFee = parseFloat(appointment.fee || 0);
+
+            if (appointment.consumed_from_plan === 1 && appointment.purchase_id && appointment.product_id) {
+              // Plan-based appointment: use plan commission rates
+              try {
+                commission = await calculateCommission(appointment.product_id, appointment.visit_type || 'followup', 0);
+              } catch (error) {
+                console.error("Error calculating commission for plan appointment:", error);
+                // Use default if calculation fails
+                commission = { platformFee: 0, professionalEarning: 0 };
+              }
+
+              // Create transaction for plan appointment
+              await connection.execute(
+                `INSERT INTO transactions
+                 (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+                  product_id, purchase_id, platform_fee, professional_earning)
+                 VALUES ('followup_appointment', ?, ?, ?, ?, 'card', 'paid', ?, ?, ?, ?)`,
+                [
+                  appointmentId,
+                  appointment.patient_id,
+                  appointment.doctor_id,
+                  0, // amount = 0 for plan appointments
+                  appointment.product_id,
+                  appointment.purchase_id,
+                  commission.platformFee || 0,
+                  commission.professionalEarning || 0,
+                ]
+              );
+
+              // Update doctor balance with professional earning from plan
+              if (commission.professionalEarning > 0) {
+                await connection.execute(
+                  `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+                  [commission.professionalEarning, appointment.doctor_id]
+                );
+                console.log(`✅ Updated doctor ${appointment.doctor_id} balance from plan: +${commission.professionalEarning}`);
+              }
+            } else if (appointmentFee > 0) {
+              // Follow-up paid appointment: 80% doctor, 20% platform
+              const platformFee = appointmentFee * 0.20; // 20%
+              const professionalEarning = appointmentFee * 0.80; // 80%
+
+              // Create transaction for paid follow-up appointment
+              await connection.execute(
+                `INSERT INTO transactions
+                 (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+                  platform_fee, professional_earning)
+                 VALUES ('followup_appointment', ?, ?, ?, ?, 'card', 'paid', ?, ?)`,
+                [
+                  appointmentId,
+                  appointment.patient_id,
+                  appointment.doctor_id,
+                  appointmentFee,
+                  platformFee,
+                  professionalEarning,
+                ]
+              );
+
+              // Update doctor balance (80% of appointment fee)
+              await connection.execute(
+                `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+                [professionalEarning, appointment.doctor_id]
+              );
+              console.log(`✅ Updated doctor ${appointment.doctor_id} balance from follow-up appointment: +${professionalEarning}`);
+            }
+          } else {
+            console.log(`ℹ️ Transaction already exists for appointment ${appointmentId}`);
+          }
         }
+
+        await connection.commit();
+      } catch (txError) {
+        await connection.rollback();
+        console.error("Error processing appointment completion:", txError);
+        // Don't fail the appointment update if transaction creation fails
+      } finally {
+        connection.release();
       }
     }
 
@@ -1069,6 +1208,14 @@ export const getDashboardMetrics = async (req, res) => {
       [doctorId]
     );
 
+    // Get doctor's balance from users table
+    const [balanceResult] = await query(
+      `SELECT COALESCE(balance, 0) as balance 
+       FROM users 
+       WHERE id = ? AND role = 'doctor'`,
+      [doctorId]
+    );
+
     // Pending appointments
     const [pendingAppointmentsResult] = await query(
       `SELECT COUNT(*) as count 
@@ -1148,6 +1295,7 @@ ORDER BY DATE(appointment_date) ASC;`,
         total_patients: parseInt(totalPatientsResult.count) || 0,
         total_appointments: parseInt(totalAppointmentsResult.count) || 0,
         total_earnings: parseFloat(totalEarningsResult.total) || 0,
+        balance: parseFloat(balanceResult.balance) || 0,
         pending_appointments: parseInt(pendingAppointmentsResult.count) || 0,
         weekly_appointments_revenue: weeklyChartData,
         pie_chart_data: pieChartData,

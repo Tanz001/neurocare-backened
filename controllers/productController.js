@@ -303,13 +303,12 @@ export const purchaseProduct = async (req, res) => {
     console.log(`📦 Product ${product_id} has ${productServices.length} services`);
 
     // Créer les entrées wallet pour chaque service
+    // All services in the plan should be unlocked initially (not just neurology)
     if (productServices && productServices.length > 0) {
       for (const service of productServices) {
-        // Convertir is_locked de TINYINT(1) à 0/1
-        const serviceIsLocked = service.is_locked === 1 || service.is_locked === true ? 1 : 0;
-        // Neurologie est toujours déverrouillée initialement, tous les autres services sont verrouillés
-        // jusqu'à ce que la consultation neurologique soit complétée
-        const isLocked = service.service_type === 'neurology' ? 0 : (serviceIsLocked || 1);
+        // All services in the plan are unlocked initially
+        // Services not in the plan will be locked (they won't have wallet entries)
+        const isLocked = 0; // All services in plan are unlocked
 
         await connection.execute(
           `INSERT INTO patient_service_wallet

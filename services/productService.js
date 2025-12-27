@@ -14,7 +14,8 @@ export const canBookService = async (patientId, serviceType) => {
       return { canBook: true };
     }
 
-    // Chercher une entrée wallet disponible pour ce service
+    // Simple check: if patient has remaining sessions in wallet for this service, use wallet (free)
+    // If no sessions, require payment
     const walletEntries = await query(
       `SELECT 
         psw.id,
@@ -22,22 +23,21 @@ export const canBookService = async (patientId, serviceType) => {
         psw.remaining_sessions,
         psw.is_locked,
         pp.product_id,
-        p.product_type,
-        ps.unlock_after_service
+        pp.status as purchase_status
       FROM patient_service_wallet psw
       INNER JOIN patient_purchases pp ON psw.purchase_id = pp.id
-      INNER JOIN products p ON pp.product_id = p.id
-      INNER JOIN product_services ps ON ps.product_id = p.id AND ps.service_type = ?
       WHERE psw.patient_id = ?
         AND psw.service_type = ?
         AND psw.remaining_sessions > 0
         AND pp.status = 'active'
-      ORDER BY psw.is_locked ASC, psw.created_at ASC
+        AND psw.is_locked = 0
+      ORDER BY psw.created_at ASC
       LIMIT 1`,
-      [serviceType, patientId, serviceType]
+      [patientId, serviceType]
     );
 
     if (walletEntries.length === 0) {
+      // No wallet sessions available - require payment
       return { 
         canBook: false, 
         reason: 'No available sessions in wallet for this service' 
@@ -45,36 +45,8 @@ export const canBookService = async (patientId, serviceType) => {
     }
 
     const walletEntry = walletEntries[0];
-
-    // Vérifier si le service est verrouillé
-    if (walletEntry.is_locked) {
-      // Si unlock_after_service = 'neurology', vérifier si la consultation neurologique est complétée
-      if (walletEntry.unlock_after_service === 'neurology') {
-        // Vérifier si le patient a complété une consultation neurologique pour ce même achat
-        const hasCompletedNeurology = await query(
-          `SELECT COUNT(*) as count
-           FROM appointments a
-           WHERE a.patient_id = ?
-             AND a.service_type = 'neurology'
-             AND a.status = 'completed'
-             AND a.purchase_id = ?`,
-          [patientId, walletEntry.purchase_id]
-        );
-
-        if (hasCompletedNeurology[0].count === 0) {
-          return { 
-            canBook: false, 
-            reason: 'Neurology consultation must be completed first' 
-          };
-        }
-      } else {
-        return { 
-          canBook: false, 
-          reason: 'Service is locked' 
-        };
-      }
-    }
-
+    
+    // Wallet has sessions and is unlocked - can book for free
     return { 
       canBook: true, 
       walletEntry 
@@ -162,18 +134,21 @@ export const calculateCommission = async (productId, visitType, amount) => {
  * @returns {Promise<{success: boolean, walletId?: number}>}
  */
 export const consumeWalletSession = async (purchaseId, serviceType, connection = null) => {
-  const db = connection || pool;
   const executeMethod = connection ? connection.execute.bind(connection) : pool.execute.bind(pool);
-  const queryMethod = connection 
-    ? async (sql, params) => {
-        const [rows] = await connection.execute(sql, params);
-        return rows;
-      }
-    : query;
+  
+  // Helper to execute queries within transaction
+  const executeQuery = async (sql, params) => {
+    if (connection) {
+      const [rows] = await connection.execute(sql, params);
+      return rows;
+    } else {
+      return await query(sql, params);
+    }
+  };
 
   try {
     // Trouver une entrée wallet disponible
-    const [walletEntry] = await queryMethod(
+    const walletEntries = await executeQuery(
       `SELECT id, remaining_sessions
        FROM patient_service_wallet
        WHERE purchase_id = ?
@@ -184,9 +159,11 @@ export const consumeWalletSession = async (purchaseId, serviceType, connection =
       [purchaseId, serviceType]
     );
 
-    if (!walletEntry) {
+    if (!walletEntries || walletEntries.length === 0) {
       throw new Error('No available sessions in wallet');
     }
+
+    const walletEntry = walletEntries[0];
 
     // Décrémenter le nombre de sessions restantes
     await executeMethod(
@@ -197,7 +174,7 @@ export const consumeWalletSession = async (purchaseId, serviceType, connection =
     );
 
     // Vérifier si toutes les sessions sont consommées pour ce purchase
-    const [remainingCheck] = await queryMethod(
+    const remainingChecks = await executeQuery(
       `SELECT SUM(remaining_sessions) as total_remaining
        FROM patient_service_wallet
        WHERE purchase_id = ?`,
@@ -205,7 +182,7 @@ export const consumeWalletSession = async (purchaseId, serviceType, connection =
     );
 
     // Si toutes les sessions sont consommées, marquer l'achat comme complété
-    if (remainingCheck.total_remaining === 0) {
+    if (remainingChecks && remainingChecks.length > 0 && remainingChecks[0].total_remaining === 0) {
       await executeMethod(
         `UPDATE patient_purchases
          SET status = 'completed'
@@ -232,8 +209,30 @@ export const consumeWalletSession = async (purchaseId, serviceType, connection =
  */
 export const unlockServicesAfterNeurology = async (patientId, purchaseId) => {
   try {
+    // First, check which services need to be unlocked
+    const [servicesToUnlock] = await pool.execute(
+      `SELECT 
+        psw.id,
+        psw.service_type,
+        ps.unlock_after_service
+       FROM patient_service_wallet psw
+       INNER JOIN product_services ps ON ps.product_id = (
+         SELECT product_id FROM patient_purchases WHERE id = ?
+       ) AND ps.service_type = psw.service_type
+       WHERE psw.patient_id = ?
+         AND psw.purchase_id = ?
+         AND ps.unlock_after_service = 'neurology'
+         AND psw.is_locked = 1`,
+      [purchaseId, patientId, purchaseId]
+    );
+
+    console.log(`🔓 Found ${servicesToUnlock.length} services to unlock for patient ${patientId}, purchase ${purchaseId}`);
+    if (servicesToUnlock.length > 0) {
+      console.log(`   Services to unlock:`, servicesToUnlock.map(s => s.service_type).join(', '));
+    }
+
     // Déverrouiller tous les services wallet qui nécessitent la consultation neurologique
-    await pool.execute(
+    const [result] = await pool.execute(
       `UPDATE patient_service_wallet psw
        INNER JOIN product_services ps ON ps.product_id = (
          SELECT product_id FROM patient_purchases WHERE id = ?
@@ -246,7 +245,7 @@ export const unlockServicesAfterNeurology = async (patientId, purchaseId) => {
       [purchaseId, patientId, purchaseId]
     );
 
-    console.log(`Services unlocked for patient ${patientId}, purchase ${purchaseId}`);
+    console.log(`✅ Unlocked ${result.affectedRows} services for patient ${patientId}, purchase ${purchaseId}`);
   } catch (error) {
     console.error("unlockServicesAfterNeurology error:", error);
     throw error;

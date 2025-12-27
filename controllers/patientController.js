@@ -182,18 +182,20 @@ export const getBestDoctorFromTriage = async (req, res) => {
     });
   }
 };
-
 export const getAllDoctors = async (req, res) => {
   try {
     const { speciality, search } = req.query;
-    const patientId = req.user?.id; // Patient ID if authenticated
+    const patientId = req.user?.id || null;
 
+    /* ----------------------------------------------------
+       1️⃣ Build base doctor query
+    ---------------------------------------------------- */
     const where = ["u.role = 'doctor'", "u.active = 1"];
     const params = [];
 
     if (speciality) {
-      where.push("u.speciality = ?");
-      params.push(speciality);
+      where.push("LOWER(u.speciality) = ?");
+      params.push(speciality.toLowerCase());
     }
 
     if (search) {
@@ -203,27 +205,143 @@ export const getAllDoctors = async (req, res) => {
 
     const doctors = await query(
       `
-        SELECT 
-          u.id,
-          u.full_name,
-          u.email,
-          u.phone,
-          u.speciality,
-          u.experience_years,
-          u.fee,
-          u.education,
-          u.profile_image_url,
-          u.active,
-          ROUND(COALESCE(AVG(r.rating), 0), 2) as average_rating,
-          COUNT(r.id) as total_reviews
-        FROM users u
-        LEFT JOIN reviews r ON r.doctor_id = u.id
-        WHERE ${where.join(" AND ")}
-        GROUP BY u.id
-        ORDER BY average_rating DESC, u.full_name ASC
+      SELECT 
+        u.id,
+        u.full_name,
+        u.email,
+        u.phone,
+        u.speciality,
+        u.experience_years,
+        u.fee,
+        u.education,
+        u.profile_image_url,
+        u.active,
+        ROUND(COALESCE(AVG(r.rating), 0), 2) AS average_rating,
+        COUNT(r.id) AS total_reviews
+      FROM users u
+      LEFT JOIN reviews r ON r.doctor_id = u.id
+      WHERE ${where.join(" AND ")}
+      GROUP BY u.id
+      ORDER BY average_rating DESC, u.full_name ASC
       `,
       params
     );
+
+    /* ----------------------------------------------------
+       2️⃣ Map speciality → service_type
+    ---------------------------------------------------- */
+    const specialityToServiceMap = {
+      neurologist: "neurology",
+      physiotherapist: "physiotherapy",
+      psychologist: "psychology",
+      nutritionist: "nutrition",
+      coach: "coaching",
+    };
+
+    /* ----------------------------------------------------
+       3️⃣ If NOT authenticated → return simple list
+    ---------------------------------------------------- */
+    if (!patientId) {
+      const result = doctors.map((doctor) => ({
+        ...doctor,
+        service_type:
+          specialityToServiceMap[doctor.speciality?.toLowerCase()] || null,
+        is_locked: false,
+        can_book: true,
+      }));
+
+      return res.status(200).json({
+        success: true,
+        doctors: result,
+      });
+    }
+
+    /* ----------------------------------------------------
+       4️⃣ Check if patient completed a NEUROLOGY appointment
+           🔥 FIXED (no destructuring bug)
+    ---------------------------------------------------- */
+    const completedNeurologyAppointments = await query(
+      `
+      SELECT COUNT(*) AS count
+      FROM appointments
+      WHERE patient_id = ?
+        AND status = 'completed'
+        AND service_type = 'neurology'
+      `,
+      [patientId]
+    );
+
+    const hasCompletedNeurologyAppointment =
+      completedNeurologyAppointments[0]?.count > 0;
+
+    console.log(
+      `🧠 Neurology completed for patient ${patientId}:`,
+      hasCompletedNeurologyAppointment
+    );
+
+    /* ----------------------------------------------------
+       5️⃣ Enrich doctors with lock / booking logic
+    ---------------------------------------------------- */
+    const doctorsWithLockStatus = doctors.map((doctor) => {
+      const serviceType =
+        specialityToServiceMap[doctor.speciality?.toLowerCase()] || null;
+
+      let is_locked = false;
+      let can_book = true;
+
+      // 🔓 Neurology is ALWAYS unlocked
+      if (serviceType === "neurology") {
+        is_locked = false;
+        can_book = true;
+      }
+      // 🔒 Other services require completed neurology
+      else if (serviceType && !hasCompletedNeurologyAppointment) {
+        is_locked = true;
+        can_book = false;
+      }
+
+      return {
+        ...doctor,
+        service_type: serviceType,
+        is_locked,
+        can_book,
+      };
+    });
+
+    /* ----------------------------------------------------
+       6️⃣ Send response
+    ---------------------------------------------------- */
+    return res.status(200).json({
+      success: true,
+      doctors: doctorsWithLockStatus,
+    });
+  } catch (error) {
+    console.error("❌ getAllDoctors error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch doctors",
+    });
+  }
+};
+
+
+export const getDoctorById = async (req, res) => {
+  try {
+    const doctorId = parseInt(req.params.doctorId, 10);
+    if (isNaN(doctorId)) {
+      return res.status(400).json({ success: false, message: "Invalid doctor ID" });
+    }
+
+    const patientId = req.user ? req.user.id : null;
+
+    const [doctor] = await query(
+      `SELECT * FROM users WHERE id = ? AND role = 'doctor' AND active = 1`,
+      [doctorId]
+    );
+
+    if (!doctor) {
+      return res.status(404).json({ success: false, message: "Doctor not found" });
+    }
 
     // Map spécialité to service_type
     const specialityToServiceMap = {
@@ -234,110 +352,81 @@ export const getAllDoctors = async (req, res) => {
       'coach': 'coaching'
     };
 
-    // Si le patient est authentifié, vérifier le wallet pour chaque médecin
-    let doctorsWithLockStatus = doctors;
+    const serviceType = specialityToServiceMap[doctor.speciality?.toLowerCase()];
+    let is_locked = false;
+    let can_book = true;
+
+    // Si le patient est authentifié, vérifier le statut de verrouillage
     if (patientId) {
       try {
-        // Récupérer le wallet du patient
-        const walletEntries = await query(
-          `SELECT 
-            psw.service_type,
-            psw.is_locked,
-            psw.remaining_sessions,
-            pp.status as purchase_status
-          FROM patient_service_wallet psw
-          INNER JOIN patient_purchases pp ON psw.purchase_id = pp.id
-          WHERE psw.patient_id = ?
-            AND psw.remaining_sessions > 0
-            AND pp.status = 'active'`,
+        // Vérifier si le patient a complété au moins un rendez-vous avec un neurologue
+        // Check both by doctor speciality and by service_type
+        const [completedNeurologyAppointments] = await query(
+          `SELECT COUNT(*) as count
+           FROM appointments a
+           INNER JOIN users u ON a.doctor_id = u.id
+           WHERE a.patient_id = ?
+             AND a.status = 'completed'
+             AND (
+               u.speciality = 'neurologist' 
+               OR a.service_type = 'neurology'
+             )
+           LIMIT 1`,
           [patientId]
         );
 
-        // Créer un map des services verrouillés
-        const lockedServices = new Set();
-        const availableServices = new Set();
-        
-        walletEntries.forEach(entry => {
-          const serviceType = entry.service_type;
-          if (entry.is_locked === 1) {
-            lockedServices.add(serviceType);
+        const hasCompletedNeurologyAppointment = completedNeurologyAppointments[0]?.count > 0;
+
+        // Si c'est un neurologue, toujours déverrouillé
+        if (serviceType === 'neurology') {
+          is_locked = false;
+          can_book = true;
+        } else if (serviceType) {
+          // Pour les autres services, vérifier si le patient a complété un rendez-vous neurologique
+          if (!hasCompletedNeurologyAppointment) {
+            // Si pas de rendez-vous neurologique complété, verrouiller tous les autres services
+            is_locked = true;
+            can_book = false;
           } else {
-            availableServices.add(serviceType);
-          }
-        });
+            // Si rendez-vous neurologique complété, vérifier le wallet
+            const walletEntries = await query(
+              `SELECT 
+                psw.service_type,
+                psw.is_locked,
+                psw.remaining_sessions,
+                pp.status as purchase_status
+              FROM patient_service_wallet psw
+              INNER JOIN patient_purchases pp ON psw.purchase_id = pp.id
+              WHERE psw.patient_id = ?
+                AND psw.service_type = ?
+                AND psw.remaining_sessions > 0
+                AND pp.status = 'active'
+              LIMIT 1`,
+              [patientId, serviceType]
+            );
 
-        // Enrichir chaque médecin avec le statut de verrouillage
-        doctorsWithLockStatus = doctors.map(doctor => {
-          const serviceType = specialityToServiceMap[doctor.speciality?.toLowerCase()];
-          let is_locked = false;
-          let can_book = true;
-
-          // Si le patient a un wallet avec ce service
-          if (serviceType) {
-            if (lockedServices.has(serviceType)) {
-              is_locked = true;
-              can_book = false;
-            } else if (availableServices.has(serviceType)) {
+            if (walletEntries && walletEntries.length > 0) {
+              const entry = walletEntries[0];
+              if (entry.is_locked === 1) {
+                is_locked = true;
+                can_book = false;
+              } else {
+                is_locked = false;
+                can_book = true;
+              }
+            } else {
+              // Service pas dans le wallet mais rendez-vous neurologique complété = déverrouillé
               is_locked = false;
               can_book = true;
             }
-            // Si le service n'est pas dans le wallet, can_book reste true (pas de restriction)
           }
-
-          return {
-            ...doctor,
-            service_type: serviceType || null,
-            is_locked: is_locked,
-            can_book: can_book,
-          };
-        });
-      } catch (walletError) {
-        console.error("Error fetching wallet for doctors:", walletError);
-        // En cas d'erreur, retourner les médecins sans information de verrouillage
-        doctorsWithLockStatus = doctors.map(doctor => ({
-          ...doctor,
-          service_type: specialityToServiceMap[doctor.speciality?.toLowerCase()] || null,
-          is_locked: false,
-          can_book: true,
-        }));
+        }
+      } catch (lockError) {
+        console.error("Error checking lock status for doctor:", lockError);
+        // En cas d'erreur, considérer comme déverrouillé
+        is_locked = false;
+        can_book = true;
       }
-    } else {
-      // Si pas authentifié, ajouter juste le service_type
-      doctorsWithLockStatus = doctors.map(doctor => ({
-        ...doctor,
-        service_type: specialityToServiceMap[doctor.speciality?.toLowerCase()] || null,
-        is_locked: false,
-        can_book: true,
-      }));
-    }
-
-    return res.status(200).json({
-      success: true,
-      doctors: doctorsWithLockStatus,
-    });
-  } catch (error) {
-    console.error("getAllDoctors error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch doctors",
-    });
-  }
-};
-
-export const getDoctorById = async (req, res) => {
-  try {
-    const doctorId = parseInt(req.params.doctorId, 10);
-    if (isNaN(doctorId)) {
-      return res.status(400).json({ success: false, message: "Invalid doctor ID" });
-    }
-
-    const [doctor] = await query(
-      `SELECT * FROM users WHERE id = ? AND role = 'doctor' AND active = 1`,
-      [doctorId]
-    );
-
-    if (!doctor) {
-      return res.status(404).json({ success: false, message: "Doctor not found" });
     }
 
     const [scheduleRow] = await query(`SELECT * FROM doctor_schedules WHERE doctor_id = ?`, [doctorId]);
@@ -377,6 +466,9 @@ export const getDoctorById = async (req, res) => {
       success: true,
       doctor: {
         ...doctor,
+        service_type: serviceType || null,
+        is_locked: is_locked,
+        can_book: can_book,
         schedule: parsedSchedule,
         experience,
         doctor_education,
@@ -400,8 +492,8 @@ export const createAppointment = async (req, res) => {
   try {
     await connection.beginTransaction();
     
-    const patientId = req.user.id;
     const {
+      patient_id,
       doctor_id,
       appointment_date,
       appointment_time,
@@ -413,6 +505,18 @@ export const createAppointment = async (req, res) => {
       purchase_id, // Optionnel: ID de l'achat si c'est depuis un plan/package
       use_wallet = true, // Par défaut, utiliser le wallet si disponible
     } = req.body;
+
+    // Get patient_id from body, fallback to token if not provided
+    const patientId = patient_id || (req.user ? req.user.id : null);
+
+    if (!patientId) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: "patient_id is required",
+      });
+    }
 
     // Utiliser let pour permettre la réassignation
     let payment_method = paymentMethodFromBody;
@@ -458,25 +562,18 @@ export const createAppointment = async (req, res) => {
     let visitType = 'first';
     let consumedFromPlan = false;
 
-    // Vérifier si le patient a un plan actif
-    const activePlan = await query(
-      `SELECT COUNT(*) as count FROM patient_purchases WHERE patient_id = ? AND status = 'active'`,
-      [patientId]
-    );
-    const hasActivePlan = activePlan && activePlan.length > 0 && activePlan[0].count > 0;
-
-    // Si le patient a un plan actif, vérifier si le service peut être réservé depuis le wallet
-    // Si oui, utiliser le wallet (gratuit). Si non, permettre la réservation avec paiement
-    if (hasActivePlan && determinedServiceType !== 'group_session') {
-      // Patient avec plan actif - vérifier si le service est disponible dans le plan
+    // Simple logic: Check wallet for remaining sessions
+    // If sessions available → use wallet (free, no payment)
+    // If no sessions → require payment (doctor's fee via payment method)
+    if (determinedServiceType !== 'group_session') {
       const walletCheck = await canBookService(patientId, determinedServiceType);
       
       if (walletCheck.canBook && walletCheck.walletEntry) {
-        // Réserver depuis le wallet (gratuit - première consultation du plan)
+        // Wallet has remaining sessions - use wallet (free, no payment)
         consumedFromPlan = true;
         walletPurchaseId = walletCheck.walletEntry.purchase_id;
         
-        // Récupérer le product_id depuis l'achat
+        // Get product_id from purchase
         const [purchase] = await query(
           `SELECT product_id FROM patient_purchases WHERE id = ?`,
           [walletPurchaseId]
@@ -486,73 +583,50 @@ export const createAppointment = async (req, res) => {
           productId = purchase.product_id;
         }
 
-        // Consommer une session du wallet (utiliser la connection de transaction)
-        await consumeWalletSession(walletPurchaseId, determinedServiceType, connection);
+        // Consume wallet session
+        try {
+          await consumeWalletSession(walletPurchaseId, determinedServiceType, connection);
+        } catch (walletError) {
+          console.error("Error consuming wallet session:", walletError);
+          await connection.rollback();
+          connection.release();
+          return res.status(400).json({
+            success: false,
+            message: walletError.message || "Failed to consume wallet session. Please try again.",
+          });
+        }
         
-        // Les rendez-vous depuis un plan ont fee = 0 et payment_method = 'none'
+        // Free appointment from wallet
         appointmentFee = 0;
         payment_method = 'none';
       } else {
-        // Le service n'est pas disponible dans le wallet (plus de sessions OU verrouillé)
-        // Si verrouillé, bloquer. Si juste plus de sessions, permettre le paiement
-        if (walletCheck.reason && walletCheck.reason.includes('locked')) {
-          // Service verrouillé - bloquer la réservation
-          await connection.rollback();
-          const reason = walletCheck.reason || "This service is locked. Please complete required consultations first to unlock this service.";
-          return res.status(403).json({
-            success: false,
-            message: reason,
-          });
-        }
-        // Sinon, c'est juste qu'il n'y a plus de sessions - permettre la réservation avec paiement
-        // On continue dans le flux normal pour créer un appointment payant
-        console.log(`ℹ️ Patient has active plan but no remaining wallet sessions for ${determinedServiceType}. Allowing paid appointment.`);
+        // No wallet sessions available - require payment
+        consumedFromPlan = false;
+        console.log(`💰 No wallet sessions available for ${determinedServiceType}, payment required`);
       }
-    } else if (use_wallet && determinedServiceType !== 'group_session' && !hasActivePlan) {
-      // Patient SANS plan actif mais use_wallet = true - vérifier le wallet quand même
-      const walletCheck = await canBookService(patientId, determinedServiceType);
-      
-      if (walletCheck.canBook && walletCheck.walletEntry) {
-        // Réserver depuis le wallet (si disponible)
-        consumedFromPlan = true;
-        walletPurchaseId = walletCheck.walletEntry.purchase_id;
-        
-        const [purchase] = await query(
-          `SELECT product_id FROM patient_purchases WHERE id = ?`,
-          [walletPurchaseId]
-        );
-        
-        if (purchase) {
-          productId = purchase.product_id;
-        }
-
-        await consumeWalletSession(walletPurchaseId, determinedServiceType, connection);
-        appointmentFee = 0;
-        payment_method = 'none';
-      }
-      // Si pas de wallet disponible et pas de plan actif, on continue pour créer un appointment payant
     }
 
-    // Si pas de wallet ou pas disponible, c'est un rendez-vous payant
+    // If no wallet sessions, this is a paid appointment
     if (!consumedFromPlan) {
       // When payment is required (no wallet), it's always a follow-up appointment
       visitType = 'followup';
       
-      // Pour les sessions de groupe, payment_method est requis
+      // For group sessions
       if (determinedServiceType === 'group_session') {
         if (!payment_method) {
           await connection.rollback();
+          connection.release();
           return res.status(400).json({
             success: false,
             message: "payment_method is required for group sessions",
           });
         }
-        // Le prix des sessions de groupe sera géré séparément (€39-€59)
-        appointmentFee = doctor.fee || 39; // Par défaut
+        appointmentFee = doctor.fee || 39;
       } else {
         // Use doctor's fee for paid appointments
         if (!doctor.fee || doctor.fee <= 0) {
           await connection.rollback();
+          connection.release();
           return res.status(400).json({
             success: false,
             message: "Doctor fee is not set. Please contact support.",
@@ -561,12 +635,15 @@ export const createAppointment = async (req, res) => {
 
         appointmentFee = parseFloat(doctor.fee);
 
-        // Si c'est un appointment payant (pas depuis le wallet), payment_method est requis
-        if (!payment_method) {
+        // For paid appointments, payment must be processed via Stripe
+        // If createAppointment is called directly without payment, return error
+        // Payment should be processed via createAppointmentPaymentIntent + confirmAppointmentPayment
+        if (!payment_method || payment_method === 'none') {
           await connection.rollback();
+          connection.release();
           return res.status(400).json({
             success: false,
-            message: "payment_method is required for paid appointments. Please select a payment method.",
+            message: "Payment is required for this appointment. Please process payment first via payment intent.",
           });
         }
       }
@@ -662,6 +739,8 @@ export const createAppointment = async (req, res) => {
     }
 
     // Créer le rendez-vous avec les nouvelles colonnes
+    console.log(`📅 Creating appointment: patientId=${patientId}, doctorId=${doctor_id}, consumedFromPlan=${consumedFromPlan}, serviceType=${determinedServiceType}`);
+    
     const [insertResult] = await connection.execute(
       `INSERT INTO appointments 
         (patient_id, doctor_id, appointment_date, appointment_time, appointment_for, fee, 
@@ -687,12 +766,13 @@ export const createAppointment = async (req, res) => {
     );
 
     const appointmentId = insertResult.insertId;
+    console.log(`✅ Appointment inserted with ID: ${appointmentId}, consumedFromPlan: ${consumedFromPlan}`);
 
     // Si l'appointment est depuis un plan, créer une transaction
     if (consumedFromPlan && walletPurchaseId) {
       try {
         // Récupérer les informations du purchase pour calculer la commission
-        const [purchaseInfo] = await connection.execute(
+        const purchaseInfoResult = await connection.execute(
           `SELECT pp.product_id, pp.total_paid, p.platform_commission_percent 
            FROM patient_purchases pp
            INNER JOIN products p ON pp.product_id = p.id
@@ -700,38 +780,49 @@ export const createAppointment = async (req, res) => {
           [walletPurchaseId]
         );
 
-        if (purchaseInfo && purchaseInfo.length > 0) {
-          const purchase = purchaseInfo[0];
-          // Calculer la commission (pour un followup appointment depuis un plan, utiliser le pourcentage de followup)
-          const commission = await calculateCommission(purchase.product_id, visitType, 0); // fee = 0 car c'est depuis le plan
+        const purchaseInfo = purchaseInfoResult[0]; // Get rows array from result
 
-          // Créer la transaction avec transaction_type='followup_appointment'
-          // Note: payment_method peut être NULL selon la migration de l'utilisateur
+        if (!purchaseInfo || purchaseInfo.length === 0) {
+          console.error(`❌ No purchase info found for walletPurchaseId: ${walletPurchaseId}`);
+          throw new Error("Purchase information not found");
+        }
+
+        const purchase = purchaseInfo[0];
+        
+        if (!purchase || !purchase.product_id) {
+          console.error("❌ Purchase info is missing product_id:", purchase);
+          throw new Error("Invalid purchase information - product_id is missing");
+        }
+        
+        // Calculer la commission (pour un followup appointment depuis un plan, utiliser le pourcentage de followup)
+        const commission = await calculateCommission(purchase.product_id, visitType, 0); // fee = 0 car c'est depuis le plan
+
+        // Créer la transaction avec transaction_type='followup_appointment'
+        // payment_method = 'card' for plan-based appointments (ENUM doesn't support 'plan', using 'card' as default)
+        await connection.execute(
+          `INSERT INTO transactions
+           (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
+            product_id, purchase_id, platform_fee, professional_earning)
+           VALUES ('followup_appointment', ?, ?, ?, ?, 'card', 'paid', ?, ?, ?, ?)`,
+          [
+            appointmentId,
+            patientId,
+            doctor_id,
+            0, // amount = 0 car c'est depuis un plan
+            purchase.product_id,
+            walletPurchaseId,
+            commission.platformFee || 0,
+            commission.professionalEarning || 0,
+          ]
+        );
+
+        // Update doctor's balance (professional earning from plan)
+        if (commission.professionalEarning > 0) {
           await connection.execute(
-            `INSERT INTO transactions
-             (transaction_type, appointment_id, patient_id, doctor_id, amount, payment_method, status,
-              product_id, purchase_id, platform_fee, professional_earning)
-             VALUES ('followup_appointment', ?, ?, ?, ?, NULL, 'paid', ?, ?, ?, ?)`,
-            [
-              appointmentId,
-              patientId,
-              doctor_id,
-              0, // amount = 0 car c'est depuis un plan
-              purchase.product_id,
-              walletPurchaseId,
-              commission.platformFee || 0,
-              commission.professionalEarning || 0,
-            ]
+            `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
+            [commission.professionalEarning, doctor_id]
           );
-
-          // Update doctor's balance (professional earning from plan)
-          if (commission.professionalEarning > 0) {
-            await connection.execute(
-              `UPDATE users SET balance = balance + ? WHERE id = ? AND role = 'doctor'`,
-              [commission.professionalEarning, doctor_id]
-            );
-            console.log(`✅ Updated doctor ${doctor_id} balance from plan: +${commission.professionalEarning}`);
-          }
+          console.log(`✅ Updated doctor ${doctor_id} balance from plan: +${commission.professionalEarning}`);
         }
       } catch (txError) {
         console.error("Error creating transaction for plan appointment:", txError);
@@ -792,7 +883,27 @@ export const createAppointment = async (req, res) => {
       }
     }
 
+    // Commit the transaction
     await connection.commit();
+    console.log(`✅ Transaction committed successfully for appointment ID: ${insertResult.insertId}`);
+    
+    // Verify appointment was created by querying it back
+    const verifyAppointmentResult = await query(
+      `SELECT id, status, consumed_from_plan FROM appointments WHERE id = ?`,
+      [insertResult.insertId]
+    );
+    
+    if (!verifyAppointmentResult || verifyAppointmentResult.length === 0) {
+      console.error(`❌ CRITICAL: Appointment ${insertResult.insertId} was not found after commit!`);
+      connection.release();
+      return res.status(500).json({
+        success: false,
+        message: "Appointment was created but could not be verified. Please contact support.",
+      });
+    }
+    
+    const verifyAppointment = verifyAppointmentResult[0];
+    console.log(`✅ Appointment verified in database: ID=${verifyAppointment.id}, status=${verifyAppointment.status}, consumedFromPlan=${verifyAppointment.consumed_from_plan}`);
 
     return res.status(201).json({
       success: true,
